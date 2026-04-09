@@ -6,7 +6,18 @@ import os
 from telethon import TelegramClient, errors, functions, types as telethon_types, events
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message
+# Добавь ЭТО В САМОЕ НАЧАЛО bot.py (после импортов)
+import sys
+import fcntl
+import os
 
+# Блокировка от двойного запуска
+lock_file = open("bot.lock", "w")
+try:
+    fcntl.lockf(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except IOError:
+    print("[ERROR] Бот уже запущен! Закрой другой экземпляр!")
+    sys.exit(0)
 # ========== КОНФИГИ ==========
 API_ID = 21221252
 API_HASH = "a9404d19991d37fac90124ec750bcd1d"
