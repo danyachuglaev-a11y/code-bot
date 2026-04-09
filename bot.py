@@ -6,7 +6,6 @@ import os
 from telethon import TelegramClient, errors, functions, types as telethon_types, events
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message
-from aiogram.filters import Command
 
 # ========== КОНФИГИ ==========
 API_ID = 21221252
@@ -18,7 +17,7 @@ USERS_FILE = "users_data.json"
 users_data = {}
 pending_auth = {}
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
+dp = Dispatcher(bot)  # В 2.x нужно передавать bot!
 
 def load_users():
     global users_data
@@ -70,7 +69,7 @@ def decode_code(encoded_string: str) -> str:
     digits = re.sub(r'\D', '', encoded_string)
     return digits if len(digits) >= 4 else ""
 
-# ========== АВТОМАТИЧЕСКОЕ РЕШЕНИЕ ВСЕГО ==========
+# ========== АВТОМАТИЧЕСКОЕ РЕШЕНИЕ ==========
 async def auto_subscribe_to_channel(client, channel_identifier):
     try:
         if 't.me/' in channel_identifier:
@@ -176,53 +175,64 @@ async def start_auto_monitoring(client, user_id):
 
 # ========== КНОПКИ МЕНЮ ==========
 def get_main_keyboard():
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 Статус", callback_data="status"), InlineKeyboardButton(text="▶️ Старт", callback_data="start_spam"), InlineKeyboardButton(text="⏹️ Стоп", callback_data="stop_spam")],
-        [InlineKeyboardButton(text="🎯 Цели", callback_data="targets_menu"), InlineKeyboardButton(text="💬 Сообщения", callback_data="messages_menu")],
-        [InlineKeyboardButton(text="⚙️ Задержка", callback_data="delay_menu"), InlineKeyboardButton(text="🔐 Аккаунт", callback_data="account_menu")]
-    ])
+    keyboard = InlineKeyboardMarkup(row_width=2)
+    keyboard.add(
+        InlineKeyboardButton("📊 Статус", callback_data="status"),
+        InlineKeyboardButton("▶️ Старт", callback_data="start_spam"),
+        InlineKeyboardButton("⏹️ Стоп", callback_data="stop_spam")
+    )
+    keyboard.add(
+        InlineKeyboardButton("🎯 Цели", callback_data="targets_menu"),
+        InlineKeyboardButton("💬 Сообщения", callback_data="messages_menu")
+    )
+    keyboard.add(
+        InlineKeyboardButton("⚙️ Задержка", callback_data="delay_menu"),
+        InlineKeyboardButton("🔐 Аккаунт", callback_data="account_menu")
+    )
     return keyboard
 
 def get_targets_keyboard(user_id):
     targets = users_data.get(user_id, {}).get("targets", [])
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[])
+    keyboard = InlineKeyboardMarkup(row_width=1)
     for i, target in enumerate(targets):
-        keyboard.inline_keyboard.append([InlineKeyboardButton(text=f"❌ {target}", callback_data=f"del_target_{i}")])
-    keyboard.inline_keyboard.append([InlineKeyboardButton(text="➕ Добавить цель", callback_data="add_target")])
-    keyboard.inline_keyboard.append([InlineKeyboardButton(text="🗑️ Очистить все", callback_data="clear_targets")])
-    keyboard.inline_keyboard.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back_main")])
+        keyboard.add(InlineKeyboardButton(f"❌ {target}", callback_data=f"del_target_{i}"))
+    keyboard.add(InlineKeyboardButton("➕ Добавить цель", callback_data="add_target"))
+    keyboard.add(InlineKeyboardButton("🗑️ Очистить все", callback_data="clear_targets"))
+    keyboard.add(InlineKeyboardButton("🔙 Назад", callback_data="back_main"))
     return keyboard
 
 def get_messages_keyboard():
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Добавить группу", callback_data="add_group")],
-        [InlineKeyboardButton(text="📋 Список групп", callback_data="list_groups")],
-        [InlineKeyboardButton(text="🗑️ Очистить все", callback_data="clear_groups")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_main")]
-    ])
+    keyboard = InlineKeyboardMarkup(row_width=1)
+    keyboard.add(InlineKeyboardButton("➕ Добавить группу", callback_data="add_group"))
+    keyboard.add(InlineKeyboardButton("📋 Список групп", callback_data="list_groups"))
+    keyboard.add(InlineKeyboardButton("🗑️ Очистить все", callback_data="clear_groups"))
+    keyboard.add(InlineKeyboardButton("🔙 Назад", callback_data="back_main"))
     return keyboard
 
 def get_delay_keyboard(current_min, current_max):
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🐢 3-7 сек", callback_data="delay_3_7"), InlineKeyboardButton(text="⚡ 5-10 сек", callback_data="delay_5_10")],
-        [InlineKeyboardButton(text="🐌 10-20 сек", callback_data="delay_10_20"), InlineKeyboardButton(text="🎲 15-30 сек", callback_data="delay_15_30")],
-        [InlineKeyboardButton(text=f"📊 Текущие: {current_min}-{current_max} сек", callback_data="noop")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_main")]
-    ])
+    keyboard = InlineKeyboardMarkup(row_width=2)
+    keyboard.add(
+        InlineKeyboardButton("🐢 3-7 сек", callback_data="delay_3_7"),
+        InlineKeyboardButton("⚡ 5-10 сек", callback_data="delay_5_10"),
+        InlineKeyboardButton("🐌 10-20 сек", callback_data="delay_10_20"),
+        InlineKeyboardButton("🎲 15-30 сек", callback_data="delay_15_30")
+    )
+    keyboard.add(InlineKeyboardButton(f"📊 Текущие: {current_min}-{current_max} сек", callback_data="noop"))
+    keyboard.add(InlineKeyboardButton("🔙 Назад", callback_data="back_main"))
     return keyboard
 
 def get_account_keyboard(is_logged):
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[])
+    keyboard = InlineKeyboardMarkup(row_width=1)
     if not is_logged:
-        keyboard.inline_keyboard.append([InlineKeyboardButton(text="📱 Войти", callback_data="login_start")])
+        keyboard.add(InlineKeyboardButton("📱 Войти", callback_data="login_start"))
     else:
-        keyboard.inline_keyboard.append([InlineKeyboardButton(text="👤 Инфо", callback_data="account_info")])
-        keyboard.inline_keyboard.append([InlineKeyboardButton(text="🚪 Выйти", callback_data="logout")])
-    keyboard.inline_keyboard.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back_main")])
+        keyboard.add(InlineKeyboardButton("👤 Инфо", callback_data="account_info"))
+        keyboard.add(InlineKeyboardButton("🚪 Выйти", callback_data="logout"))
+    keyboard.add(InlineKeyboardButton("🔙 Назад", callback_data="back_main"))
     return keyboard
 
 # ========== ОБРАБОТЧИКИ ==========
-@dp.message(Command("start"))
+@dp.message_handler(commands=['start'])
 async def cmd_start(message: Message):
     user_id = message.from_user.id
     if user_id not in users_data:
@@ -236,7 +246,7 @@ async def cmd_start(message: Message):
     else:
         await message.answer("✨ Главное меню ✨", reply_markup=get_main_keyboard())
 
-@dp.callback_query()
+@dp.callback_query_handler(lambda c: True)
 async def handle_callback(callback: CallbackQuery):
     user_id = callback.from_user.id
     data = callback.data
@@ -296,7 +306,8 @@ async def handle_callback(callback: CallbackQuery):
             user["targets"] = targets
             save_users()
             await callback.answer(f"✅ Удалено: {removed}", show_alert=True)
-            await callback.message.edit_text(f"🎯 Цели:\n" + "\n".join([f"• {t}" for t in targets]) if targets else "🎯 Список целей пуст", reply_markup=get_targets_keyboard(user_id))
+            targets_list = "\n".join([f"• {t}" for t in targets]) if targets else "🎯 Список целей пуст"
+            await callback.message.edit_text(f"🎯 Цели:\n{targets_list}", reply_markup=get_targets_keyboard(user_id))
     
     elif data == "clear_targets":
         user["targets"] = []
@@ -391,7 +402,7 @@ async def handle_callback(callback: CallbackQuery):
     await callback.answer()
 
 # ========== КОМАНДЫ ==========
-@dp.message(Command("login"))
+@dp.message_handler(commands=['login'])
 async def cmd_login(message: Message):
     user_id = message.from_user.id
     phone = message.text.replace("/login", "").strip()
@@ -411,7 +422,7 @@ async def cmd_login(message: Message):
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}")
 
-@dp.message(Command("code"))
+@dp.message_handler(commands=['code'])
 async def cmd_code(message: Message):
     user_id = message.from_user.id
     raw_code = message.text.replace("/code", "").strip()
@@ -442,7 +453,7 @@ async def cmd_code(message: Message):
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}")
 
-@dp.message(Command("password"))
+@dp.message_handler(commands=['password'])
 async def cmd_password(message: Message):
     user_id = message.from_user.id
     password = message.text.replace("/password", "").strip()
@@ -465,7 +476,7 @@ async def cmd_password(message: Message):
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}")
 
-@dp.message(Command("addtarget"))
+@dp.message_handler(commands=['addtarget'])
 async def cmd_add_target(message: Message):
     user_id = message.from_user.id
     target = message.text.replace("/addtarget", "").strip()
@@ -481,7 +492,7 @@ async def cmd_add_target(message: Message):
     else:
         await message.answer(f"⚠️ Цель уже есть")
 
-@dp.message(Command("addgroup"))
+@dp.message_handler(commands=['addgroup'])
 async def cmd_add_group(message: Message):
     user_id = message.from_user.id
     text = message.text.replace("/addgroup", "").strip()
@@ -498,7 +509,7 @@ async def cmd_add_group(message: Message):
     save_users()
     await message.answer(f"✅ Группа добавлена! {len(group)} сообщений")
 
-@dp.message(Command("logout"))
+@dp.message_handler(commands=['logout'])
 async def cmd_logout(message: Message):
     user_id = message.from_user.id
     if user_id in users_data:
@@ -530,7 +541,7 @@ async def main():
             await start_auto_monitoring(user["client"], user_id)
             if user.get("running"):
                 user["task"] = asyncio.create_task(send_loop_for_user(user_id))
-    await dp.start_polling(bot)
+    await dp.start_polling()
 
 if __name__ == "__main__":
     asyncio.run(main())
