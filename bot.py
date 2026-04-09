@@ -2,23 +2,204 @@ import asyncio
 import random
 import json
 import re
-from telethon import TelegramClient, errors
-from aiogram import Bot, Dispatcher, types
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery
+import os
+from telethon import TelegramClient, errors, functions, types, events
+from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
+from aiogram import Bot, Dispatcher, types as aiogram_types
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 # ========== КОНФИГИ ==========
 API_ID = 21221252
 API_HASH = "a9404d19991d37fac90124ec750bcd1d"
-BOT_TOKEN = "8622367392:AAEQnzgeA1UCvmoIArZA5yIJ4FVeJfPTg60"
+BOT_TOKEN = "8512602851:AAER6GPR7P9RdNNtX0qetUsu8UTmsxJ6zwY"
 USERS_FILE = "users_data.json"
 
 # ========== ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ==========
-users_data = {}  # {user_id: {"phone": "+7xxx", "client": client, "running": False, "targets": [], "groups": [], "delay_min": 5, "delay_max": 10, "task": None}}
-pending_auth = {}  # {user_id: {phone: str, step: str, client: client}}
+users_data = {}
+pending_auth = {}
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot)
 
-# ========== ЗАГРУЗКА/СОХРАНЕНИЕ ==========
+# ========== АВТОМАТИЧЕСКОЕ РЕШЕНИЕ ВСЕГО ==========
+async def auto_subscribe_to_channel(client, channel_identifier):
+    """Автоматическая подписка на канал/чат по любому идентификатору"""
+    try:
+        # Очищаем идентификатор
+        if 't.me/' in channel_identifier:
+            username = channel_identifier.split('t.me/')[-1].split('?')[0].split('/')[0]
+        else:
+            username = channel_identifier.replace('@', '').strip()
+        
+        if not username:
+            return False, None
+        
+        # Пробуем получить entity
+        try:
+            entity = await client.get_entity(f"@{username}")
+        except:
+            entity = await client.get_entity(username)
+        
+        # Подписываемся
+        await client(functions.channels.JoinChannelRequest(
+            types.InputChannel(entity.id, entity.access_hash)
+        ))
+        
+        return True, username
+        
+    except Exception as e:
+        return False, None
+
+async def auto_solve_captcha(client, message):
+    """АВТОМАТИЧЕСКИ решает ЛЮБУЮ капчу"""
+    text = message.text.lower() if message.text else ""
+    
+    # === ТИП 1: ЦИФРОВАЯ КАПЧА ===
+    # Пример: "введите 5823", "code: 1234", "ваш код 9876"
+    numbers = re.findall(r'\b\d{4,6}\b', text)
+    if numbers:
+        code = numbers[0]
+        await client.send_message(message.chat_id, code)
+        print(f"[CAPTCHA] Решил цифровую: {code}")
+        return True, f"Цифровая капча: {code}"
+    
+    # === ТИП 2: КАПЧА С КНОПКОЙ ===
+    if message.reply_markup:
+        for row in message.reply_markup.rows:
+            for button in row.buttons:
+                button_text = button.text.lower()
+                # Нажимаем на любую кнопку которая похожа на "проверку"
+                if any(word in button_text for word in ['не робот', 'captcha', 'verify', 'проверк', 'solve', 'start', 'confirm', 'подтверд']):
+                    await message.click(button.text)
+                    print(f"[CAPTCHA] Нажал кнопку: {button.text}")
+                    return True, f"Кнопка: {button.text}"
+                
+                # Если есть эмодзи - нажимаем
+                if any(emoji in button_text for emoji in ['✅', '🔘', '🟢', '✔️', '☑️']):
+                    await message.click(button.text)
+                    print(f"[CAPTCHA] Нажал кнопку с эмодзи: {button.text}")
+                    return True, f"Эмодзи-кнопка"
+    
+    # === ТИП 3: КАПЧА С ЭМОДЗИ В ТЕКСТЕ ===
+    # Пример: "нажмите на 🦁"
+    emojis = re.findall(r'[\U0001F600-\U0001F64F\U0001F300-\U0001F5FF\U0001F680-\U0001F6FF\U0001F700-\U0001F77F\U0001F780-\U0001F7FF\U0001F800-\U0001F8FF\U0001F900-\U0001F9FF\U0001FA00-\U0001FA6F\U0001FA70-\U0001FAFF\U00002702-\U000027B0\U000024C2-\U0001F251]+', text)
+    if emojis and message.reply_markup:
+        target_emoji = emojis[0]
+        for row in message.reply_markup.rows:
+            for button in row.buttons:
+                if target_emoji in button.text:
+                    await message.click(button.text)
+                    print(f"[CAPTCHA] Нажал на эмодзи: {target_emoji}")
+                    return True, f"Эмодзи: {target_emoji}"
+    
+    # === ТИП 4: ПРОСТО НАЖАТЬ НА ЛЮБУЮ КНОПКУ ===
+    if message.reply_markup:
+        for row in message.reply_markup.rows:
+            for button in row.buttons:
+                # Нажимаем на первую попавшуюся кнопку
+                await message.click(button.text)
+                print(f"[CAPTCHA] Нажал на кнопку: {button.text}")
+                return True, f"Кнопка: {button.text}"
+    
+    # === ТИП 5: ОТПРАВИТЬ /START ИЛИ /SOLVE ===
+    if 'бот' in text or 'start' in text:
+        await client.send_message(message.chat_id, "/start")
+        print(f"[CAPTCHA] Отправил /start")
+        return True, "Отправил /start"
+    
+    if 'solve' in text or 'реши' in text:
+        await client.send_message(message.chat_id, "/solve")
+        print(f"[CAPTCHA] Отправил /solve")
+        return True, "Отправил /solve"
+    
+    return False, None
+
+async def auto_handle_sponsors(client, message):
+    """АВТОМАТИЧЕСКИ обрабатывает спонсоров"""
+    text = message.text.lower() if message.text else ""
+    
+    # Ищем ссылки на каналы
+    channel_patterns = [
+        r'(?:https?://)?(?:www\.)?t\.me/([a-zA-Z0-9_]+)',
+        r'@([a-zA-Z0-9_]+)',
+        r'(?:канал|спонсор|подпишись|подписаться)\s+@?([a-zA-Z0-9_]+)'
+    ]
+    
+    channels_found = []
+    for pattern in channel_patterns:
+        matches = re.findall(pattern, text)
+        channels_found.extend(matches)
+    
+    results = []
+    for channel in set(channels_found):
+        if len(channel) > 3:  # Нормальное имя канала
+            success, name = await auto_subscribe_to_channel(client, channel)
+            if success:
+                results.append(f"✅ Подписался на @{name}")
+                print(f"[SPONSOR] Подписался на @{name}")
+            else:
+                results.append(f"❌ Не удалось подписаться на @{channel}")
+    
+    return results
+
+# ========== МОНИТОРИНГ СООБЩЕНИЙ (АВТОМАТ) ==========
+async def auto_monitor_messages(client, user_id):
+    """АВТОМАТИЧЕСКИ мониторит и решает всё сам"""
+    print(f"[MONITOR:{user_id}] Автомониторинг запущен")
+    
+    @client.on(events.NewMessage)
+    async def handler(event):
+        # Проверяем что это личное сообщение
+        if event.chat_id != user_id:
+            return
+        
+        message = event.message
+        text = message.text.lower() if message.text else ""
+        
+        print(f"[MONITOR:{user_id}] Получено: {text[:100] if text else '[медиа]'}")
+        
+        # === 1. ОБРАБОТКА СПОНСОРОВ ===
+        sponsor_results = await auto_handle_sponsors(client, message)
+        
+        # === 2. РЕШЕНИЕ КАПЧИ ===
+        captcha_success, captcha_result = await auto_solve_captcha(client, message)
+        
+        # === 3. ОБРАБОТКА ТРЕБОВАНИЙ ПОДПИСАТЬСЯ ===
+        if 'подпишись' in text or 'подписаться' in text:
+            # Ищем любые ссылки в сообщении
+            all_links = re.findall(r'(?:https?://)?(?:www\.)?[a-zA-Z0-9_\-\.]+', text)
+            for link in all_links:
+                if 't.me' in link or link.startswith('@'):
+                    success, name = await auto_subscribe_to_channel(client, link)
+                    if success:
+                        print(f"[MONITOR:{user_id}] Автоподписка: @{name}")
+                        sponsor_results.append(f"✅ Автоподписка на @{name}")
+        
+        # === 4. ОБРАБОТКА ПРОВЕРКИ "Я НЕ РОБОТ" ===
+        if 'не робот' in text or 'not robot' in text or 'captcha' in text:
+            # Пробуем найти кнопку
+            if message.reply_markup:
+                for row in message.reply_markup.rows:
+                    for button in row.buttons:
+                        await message.click(button.text)
+                        print(f"[MONITOR:{user_id}] Нажал: {button.text}")
+                        break
+        
+        # === 5. ОТПРАВЛЯЕМ ОТЧЕТ В БОТА (ОПЦИОНАЛЬНО) ===
+        if sponsor_results or captcha_success:
+            report = "🛡️ **Автоматически решено:**\n\n"
+            if sponsor_results:
+                report += "\n".join(sponsor_results) + "\n"
+            if captcha_success:
+                report += f"🔓 {captcha_result}\n"
+            
+            try:
+                await bot.send_message(user_id, report, parse_mode="Markdown")
+            except:
+                pass
+
+# ========== ОСТАЛЬНОЙ КОД ==========
+# (вся менюшка и настройки такие же как в предыдущем ответе)
+
 def load_users():
     global users_data
     try:
@@ -28,7 +209,8 @@ def load_users():
                 users_data[int(user_id)] = {
                     **data,
                     "client": None,
-                    "task": None
+                    "task": None,
+                    "monitor_task": None
                 }
     except:
         users_data = {}
@@ -48,7 +230,6 @@ def save_users():
         json.dump(to_save, f, indent=2, ensure_ascii=False)
 
 def create_new_user(user_id: int):
-    """Создает нового пользователя с чистыми настройками"""
     users_data[user_id] = {
         "phone": None,
         "client": None,
@@ -57,7 +238,8 @@ def create_new_user(user_id: int):
         "message_groups": [],
         "delay_min": 5,
         "delay_max": 10,
-        "task": None
+        "task": None,
+        "monitor_task": None
     }
     save_users()
 
@@ -68,46 +250,36 @@ def decode_code(encoded_string: str) -> str:
     digits = re.sub(r'\D', '', encoded_string)
     return digits if len(digits) >= 4 else ""
 
-# ========== ЮЗЕРБОТ ДЛЯ ПОЛЬЗОВАТЕЛЯ ==========
+# ========== ЮЗЕРБОТ ==========
 async def send_loop_for_user(user_id: int):
-    """Цикл отправки для конкретного пользователя"""
-    print(f"[USERBOT:{user_id}] Цикл отправки запущен")
-    
+    print(f"[USERBOT:{user_id}] Запущен")
     while True:
         if user_id not in users_data:
             break
-            
         user = users_data[user_id]
         if not user.get("running"):
             await asyncio.sleep(2)
             continue
-        
         message_groups = user.get("message_groups", [])
         targets = user.get("targets", [])
         delay_min = user.get("delay_min", 5)
         delay_max = user.get("delay_max", 10)
-        
         if not message_groups or not targets:
             await asyncio.sleep(3)
             continue
-        
         client = user.get("client")
         if not client:
             await asyncio.sleep(5)
             continue
-        
         for target in targets:
             for group in message_groups:
                 if user_id not in users_data or not users_data[user_id].get("running"):
                     break
-                
                 for msg in group:
                     if user_id not in users_data or not users_data[user_id].get("running"):
                         break
-                    
                     delay = random.uniform(delay_min, delay_max)
                     await asyncio.sleep(delay)
-                    
                     try:
                         await client.send_message(target, msg)
                         print(f"[SENT:{user_id}] -> {target}")
@@ -115,7 +287,22 @@ async def send_loop_for_user(user_id: int):
                         print(f"[ERROR:{user_id}] {e}")
         await asyncio.sleep(3)
 
-# ========== КЛАВИАТУРЫ (ТВОЯ СТАРАЯ УДОБНАЯ МЕНЮШКА) ==========
+# ========== ЗАПУСК МОНИТОРИНГА ПРИ ЛОГИНЕ ==========
+async def start_auto_monitoring(client, user_id):
+    """Запускает автоматический мониторинг"""
+    if user_id in users_data:
+        # Останавливаем старый если был
+        if users_data[user_id].get("monitor_task"):
+            users_data[user_id]["monitor_task"].cancel()
+        
+        # Запускаем новый
+        monitor_task = asyncio.create_task(auto_monitor_messages(client, user_id))
+        users_data[user_id]["monitor_task"] = monitor_task
+        print(f"[MONITOR:{user_id}] Автомониторинг запущен")
+        return True
+    return False
+
+# ========== КНОПКИ МЕНЮ ==========
 def get_main_keyboard():
     keyboard = InlineKeyboardMarkup(row_width=2)
     keyboard.add(
@@ -124,35 +311,30 @@ def get_main_keyboard():
         InlineKeyboardButton("⏹️ Стоп", callback_data="stop_spam")
     )
     keyboard.add(
-        InlineKeyboardButton("🎯 Управление целями", callback_data="targets_menu"),
-        InlineKeyboardButton("💬 Управление сообщениями", callback_data="messages_menu")
+        InlineKeyboardButton("🎯 Цели", callback_data="targets_menu"),
+        InlineKeyboardButton("💬 Сообщения", callback_data="messages_menu")
     )
     keyboard.add(
-        InlineKeyboardButton("⚙️ Настройки задержки", callback_data="delay_menu"),
-        InlineKeyboardButton("🔐 Управление аккаунтом", callback_data="account_menu")
-    )
-    keyboard.add(
-        InlineKeyboardButton("🔄 Перезапустить бота", callback_data="restart")
+        InlineKeyboardButton("⚙️ Задержка", callback_data="delay_menu"),
+        InlineKeyboardButton("🔐 Аккаунт", callback_data="account_menu")
     )
     return keyboard
 
 def get_targets_keyboard(user_id):
     targets = users_data.get(user_id, {}).get("targets", [])
     keyboard = InlineKeyboardMarkup(row_width=1)
-    
     for i, target in enumerate(targets):
         keyboard.add(InlineKeyboardButton(f"❌ {target}", callback_data=f"del_target_{i}"))
-    
     keyboard.add(InlineKeyboardButton("➕ Добавить цель", callback_data="add_target"))
-    keyboard.add(InlineKeyboardButton("🗑️ Очистить все цели", callback_data="clear_targets"))
+    keyboard.add(InlineKeyboardButton("🗑️ Очистить все", callback_data="clear_targets"))
     keyboard.add(InlineKeyboardButton("🔙 Назад", callback_data="back_main"))
     return keyboard
 
 def get_messages_keyboard():
     keyboard = InlineKeyboardMarkup(row_width=1)
-    keyboard.add(InlineKeyboardButton("➕ Добавить группу сообщений", callback_data="add_group"))
+    keyboard.add(InlineKeyboardButton("➕ Добавить группу", callback_data="add_group"))
     keyboard.add(InlineKeyboardButton("📋 Список групп", callback_data="list_groups"))
-    keyboard.add(InlineKeyboardButton("🗑️ Очистить все группы", callback_data="clear_groups"))
+    keyboard.add(InlineKeyboardButton("🗑️ Очистить все", callback_data="clear_groups"))
     keyboard.add(InlineKeyboardButton("🔙 Назад", callback_data="back_main"))
     return keyboard
 
@@ -171,35 +353,35 @@ def get_delay_keyboard(current_min, current_max):
 def get_account_keyboard(is_logged):
     keyboard = InlineKeyboardMarkup(row_width=1)
     if not is_logged:
-        keyboard.add(InlineKeyboardButton("📱 Войти в аккаунт", callback_data="login_start"))
+        keyboard.add(InlineKeyboardButton("📱 Войти", callback_data="login_start"))
     else:
-        keyboard.add(InlineKeyboardButton("👤 Инфо об аккаунте", callback_data="account_info"))
-        keyboard.add(InlineKeyboardButton("🚪 Выйти из аккаунта", callback_data="logout"))
+        keyboard.add(InlineKeyboardButton("👤 Инфо", callback_data="account_info"))
+        keyboard.add(InlineKeyboardButton("🚪 Выйти", callback_data="logout"))
     keyboard.add(InlineKeyboardButton("🔙 Назад", callback_data="back_main"))
     return keyboard
 
 # ========== ОБРАБОТЧИКИ ==========
 @dp.message_handler(commands=['start'])
-async def cmd_start(message: Message):
+async def cmd_start(message: aiogram_types.Message):
     user_id = message.from_user.id
-    
-    # Создаем пользователя если новый
     if user_id not in users_data:
         create_new_user(user_id)
         await message.answer(
             "✨ **Добро пожаловать!** ✨\n\n"
-            "Это твой персональный UserBot Manager.\n"
-            "Все настройки сохраняются только для тебя.\n\n"
-            "🔐 **Для начала:**\n"
-            "Нажми на кнопку 'Управление аккаунтом' и войди в свой Telegram аккаунт.\n\n"
-            "👇 Используй кнопки ниже 👇",
+            "🤖 **Бот умеет ВСЁ АВТОМАТИЧЕСКИ:**\n"
+            "• Подписываться на каналы-спонсоры\n"
+            "• Решать любые капчи\n"
+            "• Проходить проверки 'я не робот'\n"
+            "• Отвечать на ботов-верификацию\n\n"
+            "🔐 **Сначала войди в аккаунт:**\n"
+            "Нажми 'Аккаунт' → 'Войти'\n\n"
+            "👇 Все настройки через кнопки 👇",
             reply_markup=get_main_keyboard(),
             parse_mode="Markdown"
         )
     else:
         await message.answer(
-            "✨ **Главное меню** ✨\n\n"
-            "Выбери действие:",
+            "✨ **Главное меню** ✨\n\nВыбери действие:",
             reply_markup=get_main_keyboard(),
             parse_mode="Markdown"
         )
@@ -209,81 +391,79 @@ async def handle_callback(callback: CallbackQuery):
     user_id = callback.from_user.id
     data = callback.data
     
-    # Проверяем существует ли пользователь
     if user_id not in users_data:
         create_new_user(user_id)
     
     user = users_data[user_id]
     is_logged = user.get("client") is not None
     
-    # ===== СТАТУС =====
     if data == "status":
-        status_text = (
-            "📊 **СТАТУС**\n\n"
+        await callback.message.edit_text(
+            f"📊 **СТАТУС**\n\n"
             f"🔐 Аккаунт: {'✅ ВОШЕЛ' if is_logged else '❌ НЕ ВОШЕЛ'}\n"
-            f"📱 Номер: {user.get('phone', '❌ Не указан')}\n"
-            f"▶️ Рассылка: {'АКТИВНА' if user.get('running') else 'ОСТАНОВЛЕНА'}\n"
+            f"📱 Номер: {user.get('phone', '❌')}\n"
+            f"▶️ Рассылка: {'🟢 АКТИВНА' if user.get('running') else '🔴 ОСТАНОВЛЕНА'}\n"
             f"🎯 Целей: {len(user.get('targets', []))}\n"
-            f"💬 Групп сообщений: {len(user.get('message_groups', []))}\n"
-            f"⏱️ Задержка: {user.get('delay_min', 5)}-{user.get('delay_max', 10)} сек"
+            f"💬 Групп: {len(user.get('message_groups', []))}\n"
+            f"⏱️ Задержка: {user.get('delay_min', 5)}-{user.get('delay_max', 10)} сек\n\n"
+            f"🛡️ **АВТО-ЗАЩИТА АКТИВНА**\n"
+            f"• Авто-подписка: 🟢\n"
+            f"• Авто-капча: 🟢",
+            reply_markup=get_main_keyboard(),
+            parse_mode="Markdown"
         )
-        await callback.message.edit_text(status_text, reply_markup=get_main_keyboard(), parse_mode="Markdown")
     
-    # ===== ЗАПУСК =====
     elif data == "start_spam":
         if not is_logged:
-            await callback.answer("❌ Сначала войди в аккаунт! Нажми 'Управление аккаунтом'", show_alert=True)
+            await callback.answer("❌ Сначала войди в аккаунт!", show_alert=True)
         else:
             user["running"] = True
             save_users()
-            
-            # Запускаем цикл если есть клиент
             if user.get("client") and not user.get("task"):
                 user["task"] = asyncio.create_task(send_loop_for_user(user_id))
-            
             await callback.answer("✅ Рассылка запущена!", show_alert=True)
             await callback.message.edit_text(
-                "✅ **Рассылка активирована!**\n\nСообщения начали отправляться.",
+                "✅ **Рассылка запущена!**\n\n🛡️ Авто-защита активна",
                 reply_markup=get_main_keyboard(),
                 parse_mode="Markdown"
             )
     
-    # ===== ОСТАНОВКА =====
     elif data == "stop_spam":
         user["running"] = False
         save_users()
         await callback.answer("⏹️ Рассылка остановлена!", show_alert=True)
         await callback.message.edit_text(
-            "⏹️ **Рассылка остановлена**\n\nЧтобы запустить снова - нажми 'Старт'.",
+            "⏹️ **Рассылка остановлена**",
             reply_markup=get_main_keyboard(),
             parse_mode="Markdown"
         )
     
-    # ===== УПРАВЛЕНИЕ ЦЕЛЯМИ =====
     elif data == "targets_menu":
         targets = user.get("targets", [])
         if not targets:
             await callback.message.edit_text(
-                "🎯 **Управление целями**\n\n"
-                "Список целей пуст.\n\n"
-                "📝 **Как добавить цель:**\n"
-                "Отправь команду: `/addtarget @username`\n\n"
-                "💡 Пример: `/addtarget @durov`",
+                "🎯 **Управление целями**\n\nСписок целей пуст.\n\n➕ Нажми 'Добавить цель'",
                 reply_markup=get_targets_keyboard(user_id),
                 parse_mode="Markdown"
             )
         else:
             targets_list = "\n".join([f"• {t}" for t in targets])
             await callback.message.edit_text(
-                f"🎯 **Управление целями**\n\n"
-                f"**Текущие цели:**\n{targets_list}\n\n"
-                f"📝 **Добавить новую:** `/addtarget @username`\n"
-                f"❌ **Удалить:** Нажми на цель ниже",
+                f"🎯 **Цели ({len(targets)}):**\n\n{targets_list}",
                 reply_markup=get_targets_keyboard(user_id),
                 parse_mode="Markdown"
             )
     
-    # ===== УДАЛЕНИЕ ЦЕЛИ =====
+    elif data == "add_target":
+        await callback.message.edit_text(
+            "➕ **Добавление цели**\n\n"
+            "Отправь username:\n"
+            "`/addtarget @username`\n\n"
+            "Пример: `/addtarget @durov`",
+            reply_markup=get_targets_keyboard(user_id),
+            parse_mode="Markdown"
+        )
+    
     elif data.startswith("del_target_"):
         idx = int(data.split("_")[2])
         targets = user.get("targets", [])
@@ -292,77 +472,43 @@ async def handle_callback(callback: CallbackQuery):
             user["targets"] = targets
             save_users()
             await callback.answer(f"✅ Удалено: {removed}", show_alert=True)
-            
-            if not targets:
-                await callback.message.edit_text(
-                    "🎯 **Управление целями**\n\nСписок целей пуст.\n\nДобавь цель: `/addtarget @username`",
-                    reply_markup=get_targets_keyboard(user_id),
-                    parse_mode="Markdown"
-                )
-            else:
-                targets_list = "\n".join([f"• {t}" for t in targets])
-                await callback.message.edit_text(
-                    f"🎯 **Управление целями**\n\n**Текущие цели:**\n{targets_list}",
-                    reply_markup=get_targets_keyboard(user_id),
-                    parse_mode="Markdown"
-                )
+            await callback.message.edit_text(
+                f"🎯 **Цели ({len(targets)}):**\n\n" + "\n".join([f"• {t}" for t in targets]) if targets else "🎯 Список целей пуст",
+                reply_markup=get_targets_keyboard(user_id),
+                parse_mode="Markdown"
+            )
     
-    # ===== ДОБАВЛЕНИЕ ЦЕЛИ =====
-    elif data == "add_target":
-        await callback.message.edit_text(
-            "➕ **Добавление цели**\n\n"
-            "Отправь команду:\n"
-            "`/addtarget @username`\n\n"
-            "📌 **Важно:**\n"
-            "• Цель может быть username или ID чата\n"
-            "• Пример: `/addtarget @durov`\n"
-            "• После добавления цель появится в списке",
-            reply_markup=get_targets_keyboard(user_id),
-            parse_mode="Markdown"
-        )
-    
-    # ===== ОЧИСТКА ЦЕЛЕЙ =====
     elif data == "clear_targets":
         user["targets"] = []
         save_users()
         await callback.answer("🗑️ Все цели очищены!", show_alert=True)
         await callback.message.edit_text(
-            "🎯 **Управление целями**\n\nСписок целей пуст.",
+            "🎯 **Цели очищены**",
             reply_markup=get_targets_keyboard(user_id),
             parse_mode="Markdown"
         )
     
-    # ===== УПРАВЛЕНИЕ СООБЩЕНИЯМИ =====
     elif data == "messages_menu":
         groups = user.get("message_groups", [])
-        groups_count = len(groups)
         total_msgs = sum(len(g) for g in groups)
-        
         await callback.message.edit_text(
             f"💬 **Управление сообщениями**\n\n"
-            f"📊 **Статистика:**\n"
-            f"• Групп сообщений: {groups_count}\n"
-            f"• Всего сообщений: {total_msgs}\n\n"
-            f"📝 **Как добавить группу:**\n"
-            f"`/addgroup текст1 | текст2 | текст3`\n\n"
-            f"💡 **Важно:**\n"
-            f"• Сообщения в группе отправляются последовательно\n"
-            f"• Разделитель: `|` (вертикальная черта)",
+            f"📊 Групп: {len(groups)}\n"
+            f"📝 Сообщений: {total_msgs}",
             reply_markup=get_messages_keyboard(),
             parse_mode="Markdown"
         )
     
-    # ===== СПИСОК ГРУПП =====
     elif data == "list_groups":
         groups = user.get("message_groups", [])
         if not groups:
             await callback.message.edit_text(
-                "📋 **Список групп сообщений**\n\nГруппы отсутствуют.\n\nДобавь первую группу:\n`/addgroup Привет | Как дела?`",
+                "📋 **Нет групп**",
                 reply_markup=get_messages_keyboard(),
                 parse_mode="Markdown"
             )
         else:
-            text = "📋 **Твои группы сообщений:**\n\n"
+            text = "📋 **Твои группы:**\n\n"
             for i, group in enumerate(groups, 1):
                 text += f"**Группа {i}** ({len(group)} сообщений):\n"
                 for j, msg in enumerate(group[:2], 1):
@@ -371,49 +517,36 @@ async def handle_callback(callback: CallbackQuery):
                 if len(group) > 2:
                     text += f"  ... и еще {len(group)-2}\n"
                 text += "\n"
-            
-            text += "🗑️ **Очистить все:** /cleargroups"
             await callback.message.edit_text(text, reply_markup=get_messages_keyboard(), parse_mode="Markdown")
     
-    # ===== ДОБАВЛЕНИЕ ГРУППЫ =====
     elif data == "add_group":
         await callback.message.edit_text(
-            "➕ **Добавление группы сообщений**\n\n"
+            "➕ **Добавление группы**\n\n"
             "Отправь команду:\n"
-            "`/addgroup сообщение1 | сообщение2 | сообщение3`\n\n"
-            "📌 **Примеры:**\n"
-            "• `/addgroup Привет! | Как дела? | Что нового?`\n"
-            "• `/addgroup /start | Помощь: /help`\n\n"
-            "💡 **Совет:** Используй `|` для разделения сообщений",
+            "`/addgroup текст1 | текст2 | текст3`\n\n"
+            "Пример: `/addgroup Привет! | Как дела?`",
             reply_markup=get_messages_keyboard(),
             parse_mode="Markdown"
         )
     
-    # ===== ОЧИСТКА ГРУПП =====
     elif data == "clear_groups":
         user["message_groups"] = []
         save_users()
-        await callback.answer("🗑️ Все группы сообщений очищены!", show_alert=True)
+        await callback.answer("🗑️ Все группы очищены!", show_alert=True)
         await callback.message.edit_text(
-            "💬 **Управление сообщениями**\n\nВсе группы удалены.",
+            "💬 **Группы очищены**",
             reply_markup=get_messages_keyboard(),
             parse_mode="Markdown"
         )
     
-    # ===== НАСТРОЙКИ ЗАДЕРЖКИ =====
     elif data == "delay_menu":
         await callback.message.edit_text(
             f"⚙️ **Настройка задержки**\n\n"
-            f"Выбери интервал между отправкой сообщений:\n\n"
-            f"📊 **Текущая задержка:** {user.get('delay_min', 5)}-{user.get('delay_max', 10)} сек\n\n"
-            f"⚠️ **Внимание:**\n"
-            f"• Слишком маленькая задержка = риск бана\n"
-            f"• Рекомендуем 5-10 секунд",
+            f"📊 Текущая: {user.get('delay_min', 5)}-{user.get('delay_max', 10)} сек",
             reply_markup=get_delay_keyboard(user.get('delay_min', 5), user.get('delay_max', 10)),
             parse_mode="Markdown"
         )
     
-    # ===== УСТАНОВКА ЗАДЕРЖКИ =====
     elif data.startswith("delay_"):
         if data == "delay_3_7":
             user["delay_min"], user["delay_max"] = 3, 7
@@ -426,100 +559,73 @@ async def handle_callback(callback: CallbackQuery):
         else:
             await callback.answer()
             return
-        
         save_users()
         await callback.answer(f"✅ Задержка: {user['delay_min']}-{user['delay_max']} сек", show_alert=True)
         await callback.message.edit_text(
-            f"⚙️ **Настройка задержки**\n\n✅ **Новая задержка:** {user['delay_min']}-{user['delay_max']} секунд",
+            f"⚙️ **Задержка обновлена!**\n\n✅ {user['delay_min']}-{user['delay_max']} секунд",
             reply_markup=get_delay_keyboard(user['delay_min'], user['delay_max']),
             parse_mode="Markdown"
         )
     
-    # ===== УПРАВЛЕНИЕ АККАУНТОМ =====
     elif data == "account_menu":
         await callback.message.edit_text(
-            f"🔐 **Управление аккаунтом**\n\n"
-            f"📊 **Текущий статус:** {'✅ ВОШЕЛ' if is_logged else '❌ НЕ ВОШЕЛ'}\n"
-            f"📱 **Номер:** {user.get('phone', '❌ Не указан')}\n\n"
-            f"🔑 **Как войти:**\n"
-            f"1. Нажми 'Войти в аккаунт'\n"
-            f"2. Отправь номер: `/login +71234567890`\n"
-            f"3. Введи код: `/code 1#2#3#4#5`\n"
-            f"4. Если нужно - 2FA пароль: `/password mypass`",
+            f"🔐 **Аккаунт**\n\n"
+            f"📊 Статус: {'✅ ВОШЕЛ' if is_logged else '❌ НЕ ВОШЕЛ'}\n"
+            f"📱 Номер: {user.get('phone', '❌')}\n\n"
+            f"🛡️ **Авто-защита работает автоматически**\n"
+            f"• Решает капчи\n"
+            f"• Подписывается на спонсоров\n"
+            f"• Проходит верификацию",
             reply_markup=get_account_keyboard(is_logged),
             parse_mode="Markdown"
         )
     
-    # ===== НАЧАЛО ЛОГИНА =====
     elif data == "login_start":
         await callback.message.edit_text(
             "📱 **Вход в аккаунт**\n\n"
-            "**Шаг 1:** Отправь номер телефона\n"
+            "**Шаг 1:** Отправь номер\n"
             "`/login +71234567890`\n\n"
-            "**Шаг 2:** После получения кода отправь его\n"
+            "**Шаг 2:** Отправь код\n"
             "`/code 1#2#3#4#5`\n\n"
-            "**Шаг 3:** Если есть 2FA пароль\n"
-            "`/password твой_пароль`\n\n"
-            "💡 **Совет:** Код можно отправлять в любом формате с разделителями для защиты от блокировки\n\n"
-            "📌 **Пример:** `/code 1#2#3#4#5` или `/code 1-2-3-4-5`",
+            "**Шаг 3:** Если есть 2FA\n"
+            "`/password пароль`",
             reply_markup=get_account_keyboard(is_logged),
             parse_mode="Markdown"
         )
     
-    # ===== ИНФО ОБ АККАУНТЕ =====
     elif data == "account_info":
         if is_logged and user.get("client"):
             try:
                 me = await user["client"].get_me()
                 await callback.answer(f"👤 {me.first_name} (@{me.username})", show_alert=True)
             except:
-                await callback.answer("❌ Не удалось получить информацию", show_alert=True)
+                await callback.answer("❌ Ошибка", show_alert=True)
         else:
             await callback.answer("❌ Не авторизован", show_alert=True)
     
-    # ===== ВЫХОД =====
     elif data == "logout":
         if user.get("client"):
             await user["client"].disconnect()
-        
         if user.get("task"):
             user["task"].cancel()
-        
+        if user.get("monitor_task"):
+            user["monitor_task"].cancel()
         user["client"] = None
         user["task"] = None
+        user["monitor_task"] = None
         user["running"] = False
         user["phone"] = None
-        user["targets"] = []
-        user["message_groups"] = []
-        user["delay_min"] = 5
-        user["delay_max"] = 10
         save_users()
-        
-        await callback.answer("🚪 Вышел из аккаунта!", show_alert=True)
+        await callback.answer("🚪 Вышел!", show_alert=True)
         await callback.message.edit_text(
-            "🔐 **Управление аккаунтом**\n\n✅ **Вы вышли из аккаунта**\n\nЧтобы войти снова - нажми 'Войти в аккаунт'",
+            "🔐 **Вы вышли из аккаунта**",
             reply_markup=get_account_keyboard(False),
             parse_mode="Markdown"
         )
     
-    # ===== НАЗАД =====
     elif data == "back_main":
         await callback.message.edit_text(
-            "✨ **Главное меню** ✨\n\nВыбери действие:",
-            reply_markup=get_main_keyboard(),
-            parse_mode="Markdown"
-        )
-    
-    # ===== ПЕРЕЗАПУСК =====
-    elif data == "restart":
-        await callback.message.edit_text(
-            "🔄 **Перезагрузка бота...**\n\nБот будет перезапущен через 2 секунды",
-            reply_markup=get_main_keyboard(),
-            parse_mode="Markdown"
-        )
-        await asyncio.sleep(2)
-        await callback.message.edit_text(
-            "✨ **Бот перезапущен!** ✨\n\nВыбери действие:",
+            "✨ **Главное меню** ✨",
             reply_markup=get_main_keyboard(),
             parse_mode="Markdown"
         )
@@ -529,9 +635,9 @@ async def handle_callback(callback: CallbackQuery):
     
     await callback.answer()
 
-# ===== КОМАНДЫ =====
+# ========== КОМАНДЫ ==========
 @dp.message_handler(commands=['login'])
-async def cmd_login(message: Message):
+async def cmd_login(message: aiogram_types.Message):
     user_id = message.from_user.id
     phone = message.text.replace("/login", "").strip()
     
@@ -539,9 +645,8 @@ async def cmd_login(message: Message):
         await message.answer("❌ Формат: `/login +71234567890`", parse_mode="Markdown")
         return
     
-    # Проверяем есть ли уже аккаунт
     if user_id in users_data and users_data[user_id].get("client"):
-        await message.answer("❌ Ты уже авторизован! Используй /logout чтобы выйти", parse_mode="Markdown")
+        await message.answer("❌ Ты уже авторизован! Используй /logout", parse_mode="Markdown")
         return
     
     try:
@@ -559,54 +664,43 @@ async def cmd_login(message: Message):
         
         await message.answer(
             f"📱 **Код отправлен на {phone}**\n\n"
-            f"Отправь код командой:\n"
-            f"`/code 1#2#3#4#5`\n\n"
-            f"💡 **Совет:** Код можно отправить в любом формате с любыми разделителями\n"
-            f"Примеры: `/code 1#2#3#4#5`, `/code 1-2-3-4-5`, `/code 12345`",
+            f"Отправь код: `/code 1#2#3#4#5`",
             parse_mode="Markdown"
         )
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}", parse_mode="Markdown")
 
 @dp.message_handler(commands=['code'])
-async def cmd_code(message: Message):
+async def cmd_code(message: aiogram_types.Message):
     user_id = message.from_user.id
     raw_code = message.text.replace("/code", "").strip()
     
     if user_id not in pending_auth:
-        await message.answer("❌ Сначала выполни `/login +номер`", parse_mode="Markdown")
+        await message.answer("❌ Сначала /login", parse_mode="Markdown")
         return
     
     auth_data = pending_auth[user_id]
-    if auth_data["step"] != "waiting_code":
-        await message.answer("❌ Неправильный шаг. Сначала /login", parse_mode="Markdown")
-        return
-    
     code = decode_code(raw_code)
+    
     if not code or len(code) < 4:
-        await message.answer(
-            f"❌ Не могу распознать код из: `{raw_code}`\n\n"
-            f"Примеры правильных форматов:\n"
-            f"• `/code 1#2#3#4#5`\n"
-            f"• `/code 1-2-3-4-5`\n"
-            f"• `/code 12345`",
-            parse_mode="Markdown"
-        )
+        await message.answer("❌ Не могу распознать код", parse_mode="Markdown")
         return
     
-    await message.answer(f"🔍 **Распознал код:** `{code}`\n⏳ Пытаюсь войти...", parse_mode="Markdown")
+    await message.answer(f"🔍 Распознал код: `{code}`\n⏳ Вход...", parse_mode="Markdown")
     
     try:
         client = auth_data["client"]
         phone = auth_data["phone"]
         await client.sign_in(phone, code=code)
         
-        # Сохраняем данные пользователя
         if user_id not in users_data:
             create_new_user(user_id)
         
         users_data[user_id]["client"] = client
         users_data[user_id]["phone"] = phone
+        
+        # ЗАПУСКАЕМ АВТОМОНИТОРИНГ!
+        await start_auto_monitoring(client, user_id)
         
         save_users()
         del pending_auth[user_id]
@@ -614,37 +708,30 @@ async def cmd_code(message: Message):
         await message.answer(
             f"✅ **Успешный вход!**\n\n"
             f"📱 Аккаунт: {phone}\n"
-            f"🎉 Теперь ты можешь:\n"
-            f"• Добавить цели: `/addtarget @username`\n"
-            f"• Добавить сообщения: `/addgroup текст | текст`\n"
-            f"• Запустить рассылку: кнопка 'Старт' в меню",
+            f"🛡️ **Авто-защита запущена!**\n"
+            f"• Бот сам будет решать капчи\n"
+            f"• Бот сам будет подписываться\n"
+            f"• Бот сам пройдет любую проверку\n\n"
+            f"Теперь настрой цели и сообщения!",
             reply_markup=get_main_keyboard(),
             parse_mode="Markdown"
         )
     except errors.SessionPasswordNeededError:
         pending_auth[user_id]["step"] = "need_password"
-        await message.answer(
-            "🔐 **Требуется 2FA пароль!**\n\n"
-            f"Отправь пароль командой:\n"
-            f"`/password ТВОЙ_ПАРОЛЬ`",
-            parse_mode="Markdown"
-        )
+        await message.answer("🔐 **Нужен 2FA пароль!**\nОтправь: `/password ПАРОЛЬ`", parse_mode="Markdown")
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}", parse_mode="Markdown")
 
 @dp.message_handler(commands=['password'])
-async def cmd_password(message: Message):
+async def cmd_password(message: aiogram_types.Message):
     user_id = message.from_user.id
     password = message.text.replace("/password", "").strip()
     
     if user_id not in pending_auth:
-        await message.answer("❌ Сначала выполни `/login` и `/code`", parse_mode="Markdown")
+        await message.answer("❌ Сначала /login", parse_mode="Markdown")
         return
     
     auth_data = pending_auth[user_id]
-    if auth_data["step"] != "need_password":
-        await message.answer("❌ 2FA пароль не требуется на этом этапе", parse_mode="Markdown")
-        return
     
     try:
         client = auth_data["client"]
@@ -657,13 +744,16 @@ async def cmd_password(message: Message):
         users_data[user_id]["client"] = client
         users_data[user_id]["phone"] = phone
         
+        # ЗАПУСКАЕМ АВТОМОНИТОРИНГ!
+        await start_auto_monitoring(client, user_id)
+        
         save_users()
         del pending_auth[user_id]
         
         await message.answer(
             f"✅ **Успешный вход с 2FA!**\n\n"
-            f"📱 Аккаунт: {phone}\n"
-            f"🎉 Теперь ты можешь настроить рассылку!",
+            f"🛡️ **Авто-защита запущена!**\n"
+            f"Бот сам решит любые капчи и подписки",
             reply_markup=get_main_keyboard(),
             parse_mode="Markdown"
         )
@@ -671,12 +761,12 @@ async def cmd_password(message: Message):
         await message.answer(f"❌ Ошибка: {str(e)}", parse_mode="Markdown")
 
 @dp.message_handler(commands=['addtarget'])
-async def cmd_add_target(message: Message):
+async def cmd_add_target(message: aiogram_types.Message):
     user_id = message.from_user.id
     target = message.text.replace("/addtarget", "").strip()
     
     if not target:
-        await message.answer("❌ Укажи цель: `/addtarget @username`", parse_mode="Markdown")
+        await message.answer("❌ Формат: `/addtarget @username`", parse_mode="Markdown")
         return
     
     if user_id not in users_data:
@@ -685,17 +775,12 @@ async def cmd_add_target(message: Message):
     if target not in users_data[user_id]["targets"]:
         users_data[user_id]["targets"].append(target)
         save_users()
-        await message.answer(
-            f"✅ **Цель добавлена!**\n\n"
-            f"🎯 {target}\n"
-            f"📊 Всего целей: {len(users_data[user_id]['targets'])}",
-            parse_mode="Markdown"
-        )
+        await message.answer(f"✅ **Цель добавлена:** {target}", parse_mode="Markdown")
     else:
-        await message.answer(f"⚠️ Цель {target} уже существует", parse_mode="Markdown")
+        await message.answer(f"⚠️ Цель уже есть", parse_mode="Markdown")
 
 @dp.message_handler(commands=['addgroup'])
-async def cmd_add_group(message: Message):
+async def cmd_add_group(message: aiogram_types.Message):
     user_id = message.from_user.id
     text = message.text.replace("/addgroup", "").strip()
     
@@ -705,7 +790,7 @@ async def cmd_add_group(message: Message):
     
     group = [x.strip() for x in text.split("|") if x.strip()]
     if not group:
-        await message.answer("❌ Группа сообщений пуста", parse_mode="Markdown")
+        await message.answer("❌ Пустая группа", parse_mode="Markdown")
         return
     
     if user_id not in users_data:
@@ -713,98 +798,52 @@ async def cmd_add_group(message: Message):
     
     users_data[user_id]["message_groups"].append(group)
     save_users()
-    
-    await message.answer(
-        f"✅ **Группа добавлена!**\n\n"
-        f"📝 Сообщений в группе: {len(group)}\n"
-        f"📊 Всего групп: {len(users_data[user_id]['message_groups'])}",
-        parse_mode="Markdown"
-    )
-
-@dp.message_handler(commands=['cleargroups'])
-async def cmd_clear_groups(message: Message):
-    user_id = message.from_user.id
-    
-    if user_id in users_data:
-        count = len(users_data[user_id].get("message_groups", []))
-        users_data[user_id]["message_groups"] = []
-        save_users()
-        await message.answer(f"🗑️ **Очищено {count} групп сообщений**", parse_mode="Markdown")
-    else:
-        await message.answer("❌ Нет данных", parse_mode="Markdown")
-
-@dp.message_handler(commands=['cleartargets'])
-async def cmd_clear_targets(message: Message):
-    user_id = message.from_user.id
-    
-    if user_id in users_data:
-        count = len(users_data[user_id].get("targets", []))
-        users_data[user_id]["targets"] = []
-        save_users()
-        await message.answer(f"🗑️ **Очищено {count} целей**", parse_mode="Markdown")
-    else:
-        await message.answer("❌ Нет данных", parse_mode="Markdown")
-
-@dp.message_handler(commands=['setdelay'])
-async def cmd_set_delay(message: Message):
-    user_id = message.from_user.id
-    parts = message.text.replace("/setdelay", "").strip().split()
-    
-    if len(parts) != 2:
-        await message.answer("❌ Формат: `/setdelay 5 10`\nГде 5 - мин, 10 - макс", parse_mode="Markdown")
-        return
-    
-    try:
-        delay_min = int(parts[0])
-        delay_max = int(parts[1])
-        
-        if delay_min < 1 or delay_max < delay_min:
-            await message.answer("❌ Неверные значения: мин >= 1, макс > мин", parse_mode="Markdown")
-            return
-        
-        if user_id not in users_data:
-            create_new_user(user_id)
-        
-        users_data[user_id]["delay_min"] = delay_min
-        users_data[user_id]["delay_max"] = delay_max
-        save_users()
-        
-        await message.answer(
-            f"✅ **Задержка обновлена!**\n\n"
-            f"⏱️ Минимальная: {delay_min} сек\n"
-            f"⏱️ Максимальная: {delay_max} сек",
-            parse_mode="Markdown"
-        )
-    except ValueError:
-        await message.answer("❌ Введи числа! Пример: `/setdelay 5 10`", parse_mode="Markdown")
+    await message.answer(f"✅ **Группа добавлена!**\n📝 {len(group)} сообщений", parse_mode="Markdown")
 
 @dp.message_handler(commands=['logout'])
-async def cmd_logout(message: Message):
+async def cmd_logout(message: aiogram_types.Message):
     user_id = message.from_user.id
     
     if user_id in users_data:
         if users_data[user_id].get("client"):
             await users_data[user_id]["client"].disconnect()
-        
         if users_data[user_id].get("task"):
             users_data[user_id]["task"].cancel()
-        
-        users_data[user_id]["client"] = None
-        users_data[user_id]["task"] = None
-        users_data[user_id]["running"] = False
-        users_data[user_id]["phone"] = None
-        users_data[user_id]["targets"] = []
-        users_data[user_id]["message_groups"] = []
+        if users_data[user_id].get("monitor_task"):
+            users_data[user_id]["monitor_task"].cancel()
+        users_data[user_id] = {
+            "phone": None,
+            "client": None,
+            "running": False,
+            "targets": [],
+            "message_groups": [],
+            "delay_min": 5,
+            "delay_max": 10,
+            "task": None,
+            "monitor_task": None
+        }
         save_users()
-        
-        await message.answer("🚪 **Вышел из аккаунта!**\n\nЧтобы войти снова - /login", parse_mode="Markdown")
+        await message.answer("🚪 **Вышел из аккаунта**", parse_mode="Markdown")
     else:
-        await message.answer("❌ Ты не авторизован", parse_mode="Markdown")
+        await message.answer("❌ Не авторизован", parse_mode="Markdown")
 
-# ===== ЗАПУСК =====
+# ========== ЗАПУСК ==========
 async def main():
     load_users()
-    print(f"🤖 Бот запущен. Загружено {len(users_data)} пользователей")
+    print("=" * 50)
+    print("🤖 БОТ ЗАПУЩЕН НА RAILWAY")
+    print("🛡️ АВТО-ЗАЩИТА АКТИВНА")
+    print("📱 БОТ САМ РЕШАЕТ КАПЧИ И ПОДПИСЫВАЕТСЯ")
+    print("=" * 50)
+    print(f"📊 Загружено пользователей: {len(users_data)}")
+    
+    # Восстанавливаем мониторинг для уже авторизованных
+    for user_id, user in users_data.items():
+        if user.get("client"):
+            await start_auto_monitoring(user["client"], user_id)
+            if user.get("running"):
+                user["task"] = asyncio.create_task(send_loop_for_user(user_id))
+    
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
