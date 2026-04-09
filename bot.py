@@ -3,10 +3,9 @@ import random
 import json
 import re
 import os
-from telethon import TelegramClient, errors, functions, types, events
-from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
-from aiogram import Bot, Dispatcher, types as aiogram_types
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from telethon import TelegramClient, errors, functions, types as telethon_types, events
+from aiogram import Bot, Dispatcher, types
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message
 
 # ========== КОНФИГИ ==========
 API_ID = 21221252
@@ -18,7 +17,7 @@ USERS_FILE = "users_data.json"
 users_data = {}
 pending_auth = {}
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(bot)
+dp = Dispatcher()  # БЕЗ bot!
 
 # ========== АВТОМАТИЧЕСКОЕ РЕШЕНИЕ ВСЕГО ==========
 async def auto_subscribe_to_channel(client, channel_identifier):
