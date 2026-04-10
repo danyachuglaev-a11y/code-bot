@@ -4,11 +4,10 @@ import json
 import re
 import os
 from telethon import TelegramClient, errors, events
-from telethon.tl.types import MessageMediaWebPage, MessageMediaPhoto
 from telethon.tl.functions.channels import JoinChannelRequest
-from telethon.tl.types import InputChannel
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message
+from aiogram.contrib.middlewares.logging import LoggingMiddleware
 
 # ========== КОНФИГИ ==========
 API_ID = 21221252
@@ -46,7 +45,7 @@ def save_users():
             "phone": data.get("phone"),
             "running": data.get("running", False),
             "targets": data.get("targets", []),
-            "message_groups": data.get("message_groups", []),
+            "messages": data.get("messages", []),
             "delay_min": data.get("delay_min", 5),
             "delay_max": data.get("delay_max", 10),
             "auto_captcha": data.get("auto_captcha", True),
@@ -61,7 +60,7 @@ def create_new_user(user_id: int):
         "client": None,
         "running": False,
         "targets": [],
-        "message_groups": [],
+        "messages": [],
         "delay_min": 5,
         "delay_max": 10,
         "task": None,
@@ -74,57 +73,38 @@ def create_new_user(user_id: int):
 def decode_code(encoded_string: str) -> str:
     if not encoded_string:
         return ""
-    encoded_string = re.sub(r'(?i)code[\s:]+', '', encoded_string.strip())
     digits = re.sub(r'\D', '', encoded_string)
     return digits if len(digits) >= 4 else ""
 
-# ========== АВТОМАТИЧЕСКОЕ РЕШЕНИЕ КАПЧ ==========
+# ========== АВТО-РЕШЕНИЕ КАПЧ ==========
 async def solve_captcha(client, message):
-    """Автоматически решает капчу"""
     text = message.text.lower() if message.text else ""
     
-    # Тип 1: Цифровая капча
     numbers = re.findall(r'\b\d{4,6}\b', text)
     if numbers:
-        code = numbers[0]
-        await client.send_message(message.chat_id, code)
-        print(f"[CAPTCHA] Решил цифровую: {code}")
-        return True, f"✅ Решил цифровую капчу: {code}"
+        await client.send_message(message.chat_id, numbers[0])
+        return True, f"✅ Решил капчу: {numbers[0]}"
     
-    # Тип 2: Кнопка "Я не робот"
     if message.reply_markup:
         for row in message.reply_markup.rows:
             for button in row.buttons:
-                button_text = button.text.lower()
-                if any(word in button_text for word in ['не робот', 'captcha', 'verify', 'проверк', 'solve', 'confirm', 'подтверд', 'start']):
+                if any(word in button.text.lower() for word in ['не робот', 'captcha', 'verify', 'проверк', 'start']):
                     await message.click(button.text)
-                    print(f"[CAPTCHA] Нажал кнопку: {button.text}")
                     return True, f"✅ Нажал кнопку: {button.text}"
     
-    # Тип 3: Отправить /start
-    if 'бот' in text or 'start' in text or 'начать' in text:
+    if 'start' in text or 'начать' in text:
         await client.send_message(message.chat_id, "/start")
-        print(f"[CAPTCHA] Отправил /start")
         return True, "✅ Отправил /start"
     
-    # Тип 4: Отправить любое сообщение
-    if 'введите' in text or 'напишите' in text:
-        await client.send_message(message.chat_id, "1")
-        print(f"[CAPTCHA] Отправил 1")
-        return True, "✅ Отправил 1"
-    
-    return False, "❌ Не удалось решить"
+    return False, ""
 
-# ========== АВТОМАТИЧЕСКАЯ ПОДПИСКА ==========
+# ========== АВТО-ПОДПИСКА ==========
 async def auto_subscribe(client, message):
-    """Автоматически подписывается на каналы из сообщения"""
     text = message.text.lower() if message.text else ""
     
-    # Ищем ссылки на каналы
     patterns = [
         r'(?:https?://)?(?:www\.)?t\.me/([a-zA-Z0-9_]+)',
-        r'@([a-zA-Z0-9_]{5,})',
-        r'(?:канал|спонсор|подпишись|подписаться|channel|subscribe)\s+@?([a-zA-Z0-9_]+)'
+        r'@([a-zA-Z0-9_]{5,})'
     ]
     
     channels = []
@@ -136,57 +116,37 @@ async def auto_subscribe(client, message):
     for channel in set(channels):
         if len(channel) > 3:
             try:
-                # Пробуем подписаться
                 entity = await client.get_entity(f"@{channel}")
                 await client(JoinChannelRequest(entity))
                 results.append(f"✅ Подписался на @{channel}")
-                print(f"[SUBSCRIBE] Подписался на @{channel}")
-            except Exception as e:
-                results.append(f"❌ Не удалось подписаться на @{channel}: {str(e)[:50]}")
-    
+            except:
+                pass
     return results
 
-# ========== МОНИТОРИНГ СООБЩЕНИЙ ==========
+# ========== МОНИТОРИНГ ==========
 async def monitor_messages(client, user_id):
-    """Мониторит входящие сообщения и автоматически решает капчи/подписывается"""
-    print(f"[MONITOR:{user_id}] Запущен")
-    
     @client.on(events.NewMessage(incoming=True))
     async def handler(event):
-        # Проверяем что это личное сообщение
         if event.is_private:
             user = users_data.get(user_id, {})
-            text = event.message.text or ""
             
-            print(f"[MONITOR:{user_id}] Получено: {text[:100]}")
-            
-            # Автоподписка
             if user.get("auto_subscribe", True):
-                subscribe_results = await auto_subscribe(client, event.message)
-                if subscribe_results:
-                    for result in subscribe_results:
-                        await bot.send_message(user_id, f"🔔 {result}")
+                results = await auto_subscribe(client, event.message)
+                for r in results:
+                    await bot.send_message(user_id, r)
             
-            # Авторешение капчи
             if user.get("auto_captcha", True):
-                captcha_solved, captcha_msg = await solve_captcha(client, event.message)
-                if captcha_solved:
-                    await bot.send_message(user_id, f"🤖 {captcha_msg}")
+                solved, msg = await solve_captcha(client, event.message)
+                if solved:
+                    await bot.send_message(user_id, msg)
 
-# ========== ЗАПУСК МОНИТОРИНГА ==========
 async def start_monitoring(user_id, client):
-    if user_id in users_data:
-        if users_data[user_id].get("monitor_task"):
-            users_data[user_id]["monitor_task"].cancel()
-        
-        task = asyncio.create_task(monitor_messages(client, user_id))
-        users_data[user_id]["monitor_task"] = task
-        return True
-    return False
+    if users_data[user_id].get("monitor_task"):
+        users_data[user_id]["monitor_task"].cancel()
+    users_data[user_id]["monitor_task"] = asyncio.create_task(monitor_messages(client, user_id))
 
-# ========== ЮЗЕРБОТ ==========
-async def send_loop_for_user(user_id: int):
-    print(f"[USERBOT:{user_id}] Запущен")
+# ========== ОТПРАВКА ==========
+async def send_loop(user_id: int):
     while True:
         if user_id not in users_data:
             break
@@ -194,407 +154,267 @@ async def send_loop_for_user(user_id: int):
         if not user.get("running"):
             await asyncio.sleep(2)
             continue
-        message_groups = user.get("message_groups", [])
+        
+        messages = user.get("messages", [])
         targets = user.get("targets", [])
         delay_min = user.get("delay_min", 5)
         delay_max = user.get("delay_max", 10)
-        if not message_groups or not targets:
+        
+        if not messages or not targets:
             await asyncio.sleep(3)
             continue
+        
         client = user.get("client")
         if not client:
             await asyncio.sleep(5)
             continue
+        
         for target in targets:
-            for msg in message_groups:
-                if user_id not in users_data or not users_data[user_id].get("running"):
+            for msg in messages:
+                if not users_data[user_id].get("running"):
                     break
+                
                 delay = random.uniform(delay_min, delay_max)
                 await asyncio.sleep(delay)
+                
                 try:
-                    await client.send_message(target, msg)
-                    print(f"[SENT:{user_id}] -> {target}")
+                    if isinstance(msg, dict) and msg.get("type") == "photo":
+                        if msg.get("file_path") and os.path.exists(msg["file_path"]):
+                            await client.send_file(target, msg["file_path"], caption=msg.get("caption", ""))
+                        else:
+                            await client.send_file(target, msg["file_id"], caption=msg.get("caption", ""))
+                    else:
+                        await client.send_message(target, str(msg))
+                    print(f"[SENT] {user_id} -> {target}")
                 except errors.SessionRevokedError:
                     users_data[user_id]["client"] = None
                     users_data[user_id]["running"] = False
-                    try:
-                        await bot.send_message(user_id, "❌ Сессия истекла! Войди заново через кнопку 'АККАУНТ'")
-                    except:
-                        pass
+                    await bot.send_message(user_id, "❌ Сессия истекла! Войди заново")
                     break
                 except Exception as e:
-                    print(f"[ERROR:{user_id}] {e}")
+                    print(f"[ERROR] {e}")
+        
         await asyncio.sleep(3)
 
-# ========== КНОПКИ МЕНЮ ==========
-def get_main_keyboard():
-    keyboard = InlineKeyboardMarkup(row_width=2)
-    keyboard.add(
+# ========== КНОПКИ ==========
+def main_keyboard():
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
         InlineKeyboardButton("📊 СТАТУС", callback_data="status"),
-        InlineKeyboardButton("▶️ СТАРТ", callback_data="start_spam"),
-        InlineKeyboardButton("⏹️ СТОП", callback_data="stop_spam")
+        InlineKeyboardButton("▶️ СТАРТ", callback_data="start"),
+        InlineKeyboardButton("⏹️ СТОП", callback_data="stop")
     )
-    keyboard.add(
-        InlineKeyboardButton("🎯 ЦЕЛИ", callback_data="targets_menu"),
-        InlineKeyboardButton("💬 СООБЩЕНИЯ", callback_data="messages_menu")
+    kb.add(
+        InlineKeyboardButton("🎯 ЦЕЛИ", callback_data="targets"),
+        InlineKeyboardButton("💬 СООБЩЕНИЯ", callback_data="messages")
     )
-    keyboard.add(
-        InlineKeyboardButton("⚙️ ЗАДЕРЖКА", callback_data="delay_menu"),
-        InlineKeyboardButton("🔐 АККАУНТ", callback_data="account_menu")
+    kb.add(
+        InlineKeyboardButton("⚙️ ЗАДЕРЖКА", callback_data="delay"),
+        InlineKeyboardButton("🔐 АККАУНТ", callback_data="account"),
+        InlineKeyboardButton("🛡️ АВТО", callback_data="auto")
     )
-    keyboard.add(
-        InlineKeyboardButton("🛡️ АВТО-ЗАЩИТА", callback_data="autoprotect_menu")
-    )
-    return keyboard
+    return kb
 
-def get_autoprotect_keyboard(user_id):
-    user = users_data.get(user_id, {})
-    auto_captcha = user.get("auto_captcha", True)
-    auto_subscribe = user.get("auto_subscribe", True)
-    
-    keyboard = InlineKeyboardMarkup(row_width=1)
-    keyboard.add(
-        InlineKeyboardButton(f"🤖 АВТО-КАПЧА: {'✅ ВКЛ' if auto_captcha else '❌ ВЫКЛ'}", callback_data="toggle_captcha"),
-        InlineKeyboardButton(f"📢 АВТО-ПОДПИСКА: {'✅ ВКЛ' if auto_subscribe else '❌ ВЫКЛ'}", callback_data="toggle_subscribe")
-    )
-    keyboard.add(InlineKeyboardButton("🔙 НАЗАД", callback_data="back_main"))
-    return keyboard
-
-def get_targets_keyboard(user_id):
+def targets_keyboard(user_id):
     targets = users_data.get(user_id, {}).get("targets", [])
-    keyboard = InlineKeyboardMarkup(row_width=1)
-    
-    if targets:
-        for i, target in enumerate(targets):
-            keyboard.add(InlineKeyboardButton(f"❌ {target}", callback_data=f"del_target_{i}"))
-        keyboard.add(InlineKeyboardButton("🗑️ ОЧИСТИТЬ ВСЕ", callback_data="clear_targets"))
-    else:
-        keyboard.add(InlineKeyboardButton("📭 СПИСОК ПУСТ", callback_data="noop"))
-    
-    keyboard.add(InlineKeyboardButton("➕ ДОБАВИТЬ ЦЕЛЬ", callback_data="add_target_start"))
-    keyboard.add(InlineKeyboardButton("🔙 НАЗАД", callback_data="back_main"))
-    return keyboard
+    kb = InlineKeyboardMarkup(row_width=1)
+    for i, t in enumerate(targets):
+        kb.add(InlineKeyboardButton(f"❌ {t}", callback_data=f"del_target_{i}"))
+    kb.add(InlineKeyboardButton("➕ ДОБАВИТЬ", callback_data="add_target"))
+    kb.add(InlineKeyboardButton("🗑️ ОЧИСТИТЬ", callback_data="clear_targets"))
+    kb.add(InlineKeyboardButton("🔙 НАЗАД", callback_data="back"))
+    return kb
 
-def get_messages_keyboard(user_id):
-    messages = users_data.get(user_id, {}).get("message_groups", [])
-    keyboard = InlineKeyboardMarkup(row_width=1)
-    
-    if messages:
-        for i, msg in enumerate(messages[:5]):
-            preview = msg[:30] + "..." if len(msg) > 30 else msg
-            keyboard.add(InlineKeyboardButton(f"❌ {preview}", callback_data=f"del_msg_{i}"))
-        if len(messages) > 5:
-            keyboard.add(InlineKeyboardButton(f"📊 ЕЩЕ {len(messages)-5}", callback_data="list_all_messages"))
-        keyboard.add(InlineKeyboardButton("🗑️ ОЧИСТИТЬ ВСЕ", callback_data="clear_messages"))
-    else:
-        keyboard.add(InlineKeyboardButton("📭 СООБЩЕНИЙ НЕТ", callback_data="noop"))
-    
-    keyboard.add(InlineKeyboardButton("➕ ДОБАВИТЬ СООБЩЕНИЕ", callback_data="add_message_start"))
-    keyboard.add(InlineKeyboardButton("🔙 НАЗАД", callback_data="back_main"))
-    return keyboard
+def messages_keyboard(user_id):
+    msgs = users_data.get(user_id, {}).get("messages", [])
+    kb = InlineKeyboardMarkup(row_width=1)
+    for i, m in enumerate(msgs[:5]):
+        if isinstance(m, dict):
+            kb.add(InlineKeyboardButton(f"❌ ФОТО {i+1}", callback_data=f"del_msg_{i}"))
+        else:
+            preview = m[:25] + "..." if len(m) > 25 else m
+            kb.add(InlineKeyboardButton(f"❌ {preview}", callback_data=f"del_msg_{i}"))
+    kb.add(InlineKeyboardButton("📝 ДОБАВИТЬ ТЕКСТ", callback_data="add_text"))
+    kb.add(InlineKeyboardButton("📸 ДОБАВИТЬ ФОТО", callback_data="add_photo"))
+    kb.add(InlineKeyboardButton("🗑️ ОЧИСТИТЬ", callback_data="clear_messages"))
+    kb.add(InlineKeyboardButton("🔙 НАЗАД", callback_data="back"))
+    return kb
 
-def get_delay_keyboard(current_min, current_max):
-    keyboard = InlineKeyboardMarkup(row_width=2)
-    keyboard.add(
-        InlineKeyboardButton("🐢 3-7 СЕК", callback_data="delay_3_7"),
-        InlineKeyboardButton("⚡ 5-10 СЕК", callback_data="delay_5_10"),
-        InlineKeyboardButton("🐌 10-20 СЕК", callback_data="delay_10_20"),
-        InlineKeyboardButton("🎲 15-30 СЕК", callback_data="delay_15_30")
+def delay_keyboard(current_min, current_max):
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        InlineKeyboardButton("3-7 СЕК", callback_data="delay_3_7"),
+        InlineKeyboardButton("5-10 СЕК", callback_data="delay_5_10"),
+        InlineKeyboardButton("10-20 СЕК", callback_data="delay_10_20"),
+        InlineKeyboardButton("15-30 СЕК", callback_data="delay_15_30")
     )
-    keyboard.add(InlineKeyboardButton(f"📊 ТЕКУЩАЯ: {current_min}-{current_max} СЕК", callback_data="noop"))
-    keyboard.add(InlineKeyboardButton("🔙 НАЗАД", callback_data="back_main"))
-    return keyboard
+    kb.add(InlineKeyboardButton(f"📊 {current_min}-{current_max} СЕК", callback_data="noop"))
+    kb.add(InlineKeyboardButton("🔙 НАЗАД", callback_data="back"))
+    return kb
 
-def get_account_keyboard(is_logged):
-    keyboard = InlineKeyboardMarkup(row_width=1)
+def account_keyboard(is_logged):
+    kb = InlineKeyboardMarkup(row_width=1)
     if not is_logged:
-        keyboard.add(InlineKeyboardButton("📱 ВОЙТИ", callback_data="login_start"))
+        kb.add(InlineKeyboardButton("📱 ВОЙТИ", callback_data="login"))
     else:
-        keyboard.add(InlineKeyboardButton("👤 ИНФО", callback_data="account_info"))
-        keyboard.add(InlineKeyboardButton("🚪 ВЫЙТИ", callback_data="logout"))
-    keyboard.add(InlineKeyboardButton("🔙 НАЗАД", callback_data="back_main"))
-    return keyboard
+        kb.add(InlineKeyboardButton("👤 ИНФО", callback_data="info"))
+        kb.add(InlineKeyboardButton("🚪 ВЫЙТИ", callback_data="logout"))
+    kb.add(InlineKeyboardButton("🔙 НАЗАД", callback_data="back"))
+    return kb
 
-def get_cancel_keyboard(back_callback):
-    keyboard = InlineKeyboardMarkup(row_width=1)
-    keyboard.add(InlineKeyboardButton("❌ ОТМЕНА", callback_data=back_callback))
-    return keyboard
+def auto_keyboard(user_id):
+    user = users_data.get(user_id, {})
+    cap = "✅ ВКЛ" if user.get("auto_captcha", True) else "❌ ВЫКЛ"
+    sub = "✅ ВКЛ" if user.get("auto_subscribe", True) else "❌ ВЫКЛ"
+    kb = InlineKeyboardMarkup(row_width=1)
+    kb.add(InlineKeyboardButton(f"🤖 КАПЧА: {cap}", callback_data="toggle_cap"))
+    kb.add(InlineKeyboardButton(f"📢 ПОДПИСКА: {sub}", callback_data="toggle_sub"))
+    kb.add(InlineKeyboardButton("🔙 НАЗАД", callback_data="back"))
+    return kb
+
+def back_keyboard(back_to):
+    kb = InlineKeyboardMarkup(row_width=1)
+    kb.add(InlineKeyboardButton("❌ ОТМЕНА", callback_data=back_to))
+    return kb
 
 # ========== ОБРАБОТЧИКИ ==========
 @dp.message_handler(commands=['start'])
-async def cmd_start(message: Message):
-    user_id = message.from_user.id
-    if user_id not in users_data:
-        create_new_user(user_id)
-        await message.answer(
-            "🤖 **USERBOT MANAGER v3.0**\n\n"
-            "✅ Бот умеет:\n"
-            "• Автоматически решать капчи\n"
-            "• Автоматически подписываться на каналы\n"
-            "• Проходить любые проверки\n\n"
-            "🔐 Сначала войди в аккаунт через кнопку АККАУНТ\n\n"
-            "👇 ВСЕ НАСТРОЙКИ ЧЕРЕЗ КНОПКИ 👇",
-            reply_markup=get_main_keyboard(),
-            parse_mode="Markdown"
-        )
-    else:
-        await message.answer(
-            "🤖 **ГЛАВНОЕ МЕНЮ**",
-            reply_markup=get_main_keyboard(),
-            parse_mode="Markdown"
-        )
+async def start_cmd(message: Message):
+    uid = message.from_user.id
+    if uid not in users_data:
+        create_new_user(uid)
+    await message.answer("🤖 **ГОТОВ К РАБОТЕ**\n\n👇 ВЫБЕРИ ДЕЙСТВИЕ", reply_markup=main_keyboard(), parse_mode="Markdown")
 
 @dp.callback_query_handler(lambda c: True)
-async def handle_callback(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    data = callback.data
+async def handle_callback(call: CallbackQuery):
+    uid = call.from_user.id
+    data = call.data
     
-    if user_id not in users_data:
-        create_new_user(user_id)
+    if uid not in users_data:
+        create_new_user(uid)
     
-    user = users_data[user_id]
+    user = users_data[uid]
     is_logged = user.get("client") is not None
     
-    # ===== СТАТУС =====
+    # СТАТУС
     if data == "status":
-        auto_cap = "✅" if user.get("auto_captcha", True) else "❌"
-        auto_sub = "✅" if user.get("auto_subscribe", True) else "❌"
-        
-        text = (
+        await call.message.edit_text(
             f"📊 **СТАТУС**\n\n"
-            f"🔐 Аккаунт: {'✅ ВОШЕЛ' if is_logged else '❌ НЕ ВОШЕЛ'}\n"
-            f"📱 Номер: {user.get('phone', 'НЕТ')}\n"
-            f"▶️ Рассылка: {'🟢 РАБОТАЕТ' if user.get('running') else '🔴 ОСТАНОВЛЕНА'}\n"
-            f"🎯 Целей: {len(user.get('targets', []))}\n"
-            f"💬 Сообщений: {len(user.get('message_groups', []))}\n"
-            f"⏱️ Задержка: {user.get('delay_min', 5)}-{user.get('delay_max', 10)} СЕК\n\n"
-            f"🛡️ **АВТО-ЗАЩИТА:**\n"
-            f"• Авто-капча: {auto_cap}\n"
-            f"• Авто-подписка: {auto_sub}"
+            f"🔐 АККАУНТ: {'✅ ВОШЕЛ' if is_logged else '❌ НЕ ВОШЕЛ'}\n"
+            f"📱 НОМЕР: {user.get('phone', 'НЕТ')}\n"
+            f"▶️ РАССЫЛКА: {'🟢 РАБОТАЕТ' if user.get('running') else '🔴 СТОП'}\n"
+            f"🎯 ЦЕЛЕЙ: {len(user.get('targets', []))}\n"
+            f"💬 СООБЩЕНИЙ: {len(user.get('messages', []))}\n"
+            f"⏱️ ЗАДЕРЖКА: {user.get('delay_min', 5)}-{user.get('delay_max', 10)} СЕК\n"
+            f"🛡️ АВТО-ЗАЩИТА: {'ВКЛ' if user.get('auto_captcha', True) else 'ВЫКЛ'}",
+            reply_markup=main_keyboard(), parse_mode="Markdown"
         )
-        try:
-            await callback.message.edit_text(text, reply_markup=get_main_keyboard(), parse_mode="Markdown")
-        except:
-            await callback.message.answer(text, reply_markup=get_main_keyboard(), parse_mode="Markdown")
-        await callback.answer()
+        await call.answer()
     
-    # ===== АВТО-ЗАЩИТА =====
-    elif data == "autoprotect_menu":
-        try:
-            await callback.message.edit_text(
-                "🛡️ **АВТОМАТИЧЕСКАЯ ЗАЩИТА**\n\n"
-                "🤖 **АВТО-КАПЧА** - бот сам решает любые капчи\n"
-                "📢 **АВТО-ПОДПИСКА** - бот сам подписывается на каналы\n\n"
-                "⚠️ Включи обе функции для полной автоматизации",
-                reply_markup=get_autoprotect_keyboard(user_id),
-                parse_mode="Markdown"
-            )
-        except:
-            await callback.message.answer(
-                "🛡️ **АВТО-ЗАЩИТА**",
-                reply_markup=get_autoprotect_keyboard(user_id),
-                parse_mode="Markdown"
-            )
-    
-    elif data == "toggle_captcha":
-        user["auto_captcha"] = not user.get("auto_captcha", True)
-        save_users()
-        status = "ВКЛЮЧЕНА" if user["auto_captcha"] else "ВЫКЛЮЧЕНА"
-        await callback.answer(f"🤖 АВТО-КАПЧА {status}!", show_alert=True)
-        try:
-            await callback.message.edit_text(
-                "🛡️ **АВТОМАТИЧЕСКАЯ ЗАЩИТА**",
-                reply_markup=get_autoprotect_keyboard(user_id),
-                parse_mode="Markdown"
-            )
-        except:
-            pass
-    
-    elif data == "toggle_subscribe":
-        user["auto_subscribe"] = not user.get("auto_subscribe", True)
-        save_users()
-        status = "ВКЛЮЧЕНА" if user["auto_subscribe"] else "ВЫКЛЮЧЕНА"
-        await callback.answer(f"📢 АВТО-ПОДПИСКА {status}!", show_alert=True)
-        try:
-            await callback.message.edit_text(
-                "🛡️ **АВТОМАТИЧЕСКАЯ ЗАЩИТА**",
-                reply_markup=get_autoprotect_keyboard(user_id),
-                parse_mode="Markdown"
-            )
-        except:
-            pass
-    
-    # ===== СТАРТ/СТОП =====
-    elif data == "start_spam":
+    # СТАРТ/СТОП
+    elif data == "start":
         if not is_logged:
-            await callback.answer("❌ СНАЧАЛА ВОЙДИ В АККАУНТ!", show_alert=True)
+            await call.answer("❌ ВОЙДИ В АККАУНТ!", show_alert=True)
         else:
             user["running"] = True
             save_users()
             if user.get("client") and not user.get("task"):
-                user["task"] = asyncio.create_task(send_loop_for_user(user_id))
-            await callback.answer("✅ РАССЫЛКА ЗАПУЩЕНА!", show_alert=True)
-            try:
-                await callback.message.edit_text("✅ **РАССЫЛКА ЗАПУЩЕНА**", reply_markup=get_main_keyboard(), parse_mode="Markdown")
-            except:
-                await callback.message.answer("✅ **РАССЫЛКА ЗАПУЩЕНА**", reply_markup=get_main_keyboard(), parse_mode="Markdown")
+                user["task"] = asyncio.create_task(send_loop(uid))
+            await call.answer("✅ ЗАПУЩЕНО!", show_alert=True)
+            await call.message.edit_text("✅ **РАССЫЛКА ЗАПУЩЕНА**", reply_markup=main_keyboard(), parse_mode="Markdown")
     
-    elif data == "stop_spam":
+    elif data == "stop":
         user["running"] = False
         save_users()
-        await callback.answer("⏹️ РАССЫЛКА ОСТАНОВЛЕНА!", show_alert=True)
-        try:
-            await callback.message.edit_text("⏹️ **РАССЫЛКА ОСТАНОВЛЕНА**", reply_markup=get_main_keyboard(), parse_mode="Markdown")
-        except:
-            await callback.message.answer("⏹️ **РАССЫЛКА ОСТАНОВЛЕНА**", reply_markup=get_main_keyboard(), parse_mode="Markdown")
+        await call.answer("⏹️ ОСТАНОВЛЕНО!", show_alert=True)
+        await call.message.edit_text("⏹️ **РАССЫЛКА ОСТАНОВЛЕНА**", reply_markup=main_keyboard(), parse_mode="Markdown")
     
-    # ===== ЦЕЛИ =====
-    elif data == "targets_menu":
+    # ЦЕЛИ
+    elif data == "targets":
         targets = user.get("targets", [])
-        if targets:
-            text = "🎯 **ТВОИ ЦЕЛИ:**\n\n" + "\n".join([f"• {t}" for t in targets])
-        else:
-            text = "🎯 **СПИСОК ЦЕЛЕЙ ПУСТ**"
-        try:
-            await callback.message.edit_text(text, reply_markup=get_targets_keyboard(user_id), parse_mode="Markdown")
-        except:
-            await callback.message.answer(text, reply_markup=get_targets_keyboard(user_id), parse_mode="Markdown")
+        text = "🎯 **ЦЕЛИ:**\n\n" + "\n".join([f"• {t}" for t in targets]) if targets else "🎯 **ЦЕЛИ ПУСТЫ**"
+        await call.message.edit_text(text, reply_markup=targets_keyboard(uid), parse_mode="Markdown")
     
-    elif data == "add_target_start":
-        temp_data[user_id] = {"action": "add_target"}
-        try:
-            await callback.message.edit_text(
-                "➕ **ДОБАВЛЕНИЕ ЦЕЛИ**\n\n"
-                "📝 **ОТПРАВЬ USERNAME:**\n\n"
-                "Пример: `@durov` или `https://t.me/durov`",
-                reply_markup=get_cancel_keyboard("targets_menu"),
-                parse_mode="Markdown"
-            )
-        except:
-            await callback.message.answer(
-                "➕ **ДОБАВЛЕНИЕ ЦЕЛИ**\n\nОТПРАВЬ USERNAME: @durov",
-                reply_markup=get_cancel_keyboard("targets_menu"),
-                parse_mode="Markdown"
-            )
+    elif data == "add_target":
+        temp_data[uid] = {"action": "add_target"}
+        await call.message.edit_text(
+            "➕ **ДОБАВЛЕНИЕ ЦЕЛИ**\n\n"
+            "📝 **ОТПРАВЬ USERNAME:**\n\n"
+            "Пример: @durov или https://t.me/durov",
+            reply_markup=back_keyboard("targets"), parse_mode="Markdown"
+        )
     
     elif data.startswith("del_target_"):
         idx = int(data.split("_")[2])
         targets = user.get("targets", [])
-        if 0 <= idx < len(targets):
-            removed = targets.pop(idx)
+        if idx < len(targets):
+            targets.pop(idx)
             user["targets"] = targets
             save_users()
-            await callback.answer(f"✅ УДАЛЕНО: {removed}", show_alert=True)
-            
-            if targets:
-                text = "🎯 **ТВОИ ЦЕЛИ:**\n\n" + "\n".join([f"• {t}" for t in targets])
-            else:
-                text = "🎯 **СПИСОК ЦЕЛЕЙ ПУСТ**"
-            try:
-                await callback.message.edit_text(text, reply_markup=get_targets_keyboard(user_id), parse_mode="Markdown")
-            except:
-                await callback.message.answer(text, reply_markup=get_targets_keyboard(user_id), parse_mode="Markdown")
+            await call.answer("✅ УДАЛЕНО!", show_alert=True)
+            text = "🎯 **ЦЕЛИ:**\n\n" + "\n".join([f"• {t}" for t in targets]) if targets else "🎯 **ЦЕЛИ ПУСТЫ**"
+            await call.message.edit_text(text, reply_markup=targets_keyboard(uid), parse_mode="Markdown")
     
     elif data == "clear_targets":
         user["targets"] = []
         save_users()
-        await callback.answer("🗑️ ВСЕ ЦЕЛИ ОЧИЩЕНЫ!", show_alert=True)
-        try:
-            await callback.message.edit_text("🎯 **ВСЕ ЦЕЛИ ОЧИЩЕНЫ**", reply_markup=get_targets_keyboard(user_id), parse_mode="Markdown")
-        except:
-            await callback.message.answer("🎯 **ВСЕ ЦЕЛИ ОЧИЩЕНЫ**", reply_markup=get_targets_keyboard(user_id), parse_mode="Markdown")
+        await call.answer("🗑️ ОЧИЩЕНО!", show_alert=True)
+        await call.message.edit_text("🎯 **ВСЕ ЦЕЛИ ОЧИЩЕНЫ**", reply_markup=targets_keyboard(uid), parse_mode="Markdown")
     
-    # ===== СООБЩЕНИЯ =====
-    elif data == "messages_menu":
-        messages = user.get("message_groups", [])
-        if messages:
-            text = "💬 **ТВОИ СООБЩЕНИЯ:**\n\n"
-            for i, msg in enumerate(messages[:10], 1):
-                preview = msg[:40] + "..." if len(msg) > 40 else msg
-                text += f"{i}. {preview}\n"
+    # СООБЩЕНИЯ
+    elif data == "messages":
+        msgs = user.get("messages", [])
+        if not msgs:
+            await call.message.edit_text("💬 **СООБЩЕНИЙ НЕТ**", reply_markup=messages_keyboard(uid), parse_mode="Markdown")
         else:
-            text = "💬 **СООБЩЕНИЙ НЕТ**"
-        try:
-            await callback.message.edit_text(text, reply_markup=get_messages_keyboard(user_id), parse_mode="Markdown")
-        except:
-            await callback.message.answer(text, reply_markup=get_messages_keyboard(user_id), parse_mode="Markdown")
+            text = "💬 **СООБЩЕНИЯ:**\n\n"
+            for i, m in enumerate(msgs, 1):
+                if isinstance(m, dict):
+                    text += f"{i}. 📸 ФОТО\n"
+                else:
+                    text += f"{i}. {m[:40]}\n"
+            await call.message.edit_text(text, reply_markup=messages_keyboard(uid), parse_mode="Markdown")
     
-    elif data == "add_message_start":
-        temp_data[user_id] = {"action": "add_message"}
-        try:
-            await callback.message.edit_text(
-                "📝 **ДОБАВЛЕНИЕ СООБЩЕНИЯ**\n\n"
-                "📤 **ОТПРАВЬ ТЕКСТ СООБЩЕНИЯ:**\n\n"
-                "Можно отправить любое текстовое сообщение",
-                reply_markup=get_cancel_keyboard("messages_menu"),
-                parse_mode="Markdown"
-            )
-        except:
-            await callback.message.answer(
-                "📝 **ДОБАВЛЕНИЕ СООБЩЕНИЯ**\n\nОТПРАВЬ ТЕКСТ",
-                reply_markup=get_cancel_keyboard("messages_menu"),
-                parse_mode="Markdown"
-            )
+    elif data == "add_text":
+        temp_data[uid] = {"action": "add_text"}
+        await call.message.edit_text(
+            "📝 **ДОБАВЛЕНИЕ ТЕКСТА**\n\n"
+            "📤 **ОТПРАВЬ ТЕКСТ:**",
+            reply_markup=back_keyboard("messages"), parse_mode="Markdown"
+        )
+    
+    elif data == "add_photo":
+        temp_data[uid] = {"action": "add_photo", "waiting": True}
+        await call.message.edit_text(
+            "📸 **ДОБАВЛЕНИЕ ФОТО**\n\n"
+            "📤 **ОТПРАВЬ ФОТО** (можно с подписью)\n\n"
+            "💡 После отправки фото добавится в список",
+            reply_markup=back_keyboard("messages"), parse_mode="Markdown"
+        )
     
     elif data.startswith("del_msg_"):
         idx = int(data.split("_")[2])
-        messages = user.get("message_groups", [])
-        if 0 <= idx < len(messages):
-            removed = messages.pop(idx)
-            user["message_groups"] = messages
+        msgs = user.get("messages", [])
+        if idx < len(msgs):
+            msgs.pop(idx)
+            user["messages"] = msgs
             save_users()
-            await callback.answer("✅ СООБЩЕНИЕ УДАЛЕНО!", show_alert=True)
-            
-            if messages:
-                text = "💬 **ТВОИ СООБЩЕНИЯ:**\n\n"
-                for i, msg in enumerate(messages[:10], 1):
-                    preview = msg[:40] + "..." if len(msg) > 40 else msg
-                    text += f"{i}. {preview}\n"
-            else:
-                text = "💬 **СООБЩЕНИЙ НЕТ**"
-            try:
-                await callback.message.edit_text(text, reply_markup=get_messages_keyboard(user_id), parse_mode="Markdown")
-            except:
-                await callback.message.answer(text, reply_markup=get_messages_keyboard(user_id), parse_mode="Markdown")
+            await call.answer("✅ УДАЛЕНО!", show_alert=True)
+            await call.message.edit_text("💬 **ОБНОВЛЕНО**", reply_markup=messages_keyboard(uid), parse_mode="Markdown")
     
     elif data == "clear_messages":
-        user["message_groups"] = []
+        user["messages"] = []
         save_users()
-        await callback.answer("🗑️ ВСЕ СООБЩЕНИЯ ОЧИЩЕНЫ!", show_alert=True)
-        try:
-            await callback.message.edit_text("💬 **ВСЕ СООБЩЕНИЯ ОЧИЩЕНЫ**", reply_markup=get_messages_keyboard(user_id), parse_mode="Markdown")
-        except:
-            await callback.message.answer("💬 **ВСЕ СООБЩЕНИЯ ОЧИЩЕНЫ**", reply_markup=get_messages_keyboard(user_id), parse_mode="Markdown")
+        await call.answer("🗑️ ОЧИЩЕНО!", show_alert=True)
+        await call.message.edit_text("💬 **ВСЕ СООБЩЕНИЯ ОЧИЩЕНЫ**", reply_markup=messages_keyboard(uid), parse_mode="Markdown")
     
-    elif data == "list_all_messages":
-        messages = user.get("message_groups", [])
-        if messages:
-            text = "📋 **ВСЕ СООБЩЕНИЯ:**\n\n"
-            for i, msg in enumerate(messages, 1):
-                preview = msg[:60] + "..." if len(msg) > 60 else msg
-                text += f"{i}. {preview}\n\n"
-            keyboard = InlineKeyboardMarkup(row_width=1)
-            keyboard.add(InlineKeyboardButton("🔙 НАЗАД", callback_data="messages_menu"))
-            try:
-                await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="Markdown")
-            except:
-                await callback.message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
-    
-    # ===== ЗАДЕРЖКА =====
-    elif data == "delay_menu":
-        try:
-            await callback.message.edit_text(
-                f"⚙️ **НАСТРОЙКА ЗАДЕРЖКИ**\n\n"
-                f"📊 ТЕКУЩАЯ: {user.get('delay_min', 5)}-{user.get('delay_max', 10)} СЕК",
-                reply_markup=get_delay_keyboard(user.get('delay_min', 5), user.get('delay_max', 10)),
-                parse_mode="Markdown"
-            )
-        except:
-            await callback.message.answer(
-                f"⚙️ **НАСТРОЙКА ЗАДЕРЖКИ**\n\nТЕКУЩАЯ: {user.get('delay_min', 5)}-{user.get('delay_max', 10)} СЕК",
-                reply_markup=get_delay_keyboard(user.get('delay_min', 5), user.get('delay_max', 10)),
-                parse_mode="Markdown"
-            )
+    # ЗАДЕРЖКА
+    elif data == "delay":
+        await call.message.edit_text(
+            f"⚙️ **ЗАДЕРЖКА:** {user.get('delay_min', 5)}-{user.get('delay_max', 10)} СЕК",
+            reply_markup=delay_keyboard(user.get('delay_min', 5), user.get('delay_max', 10)),
+            parse_mode="Markdown"
+        )
     
     elif data.startswith("delay_"):
         if data == "delay_3_7":
@@ -605,67 +425,40 @@ async def handle_callback(callback: CallbackQuery):
             user["delay_min"], user["delay_max"] = 10, 20
         elif data == "delay_15_30":
             user["delay_min"], user["delay_max"] = 15, 30
-        else:
-            await callback.answer()
-            return
         save_users()
-        await callback.answer(f"✅ ЗАДЕРЖКА: {user['delay_min']}-{user['delay_max']} СЕК", show_alert=True)
-        try:
-            await callback.message.edit_text(
-                f"⚙️ **ЗАДЕРЖКА ОБНОВЛЕНА**\n\n✅ {user['delay_min']}-{user['delay_max']} СЕКУНД",
-                reply_markup=get_delay_keyboard(user['delay_min'], user['delay_max']),
-                parse_mode="Markdown"
-            )
-        except:
-            await callback.message.answer(
-                f"⚙️ **ЗАДЕРЖКА ОБНОВЛЕНА**\n\n✅ {user['delay_min']}-{user['delay_max']} СЕКУНД",
-                reply_markup=get_delay_keyboard(user['delay_min'], user['delay_max']),
-                parse_mode="Markdown"
-            )
+        await call.answer(f"✅ {user['delay_min']}-{user['delay_max']} СЕК", show_alert=True)
+        await call.message.edit_text(
+            f"⚙️ **ЗАДЕРЖКА:** {user['delay_min']}-{user['delay_max']} СЕК",
+            reply_markup=delay_keyboard(user['delay_min'], user['delay_max']),
+            parse_mode="Markdown"
+        )
     
-    # ===== АККАУНТ =====
-    elif data == "account_menu":
-        try:
-            await callback.message.edit_text(
-                f"🔐 **УПРАВЛЕНИЕ АККАУНТОМ**\n\n"
-                f"📊 СТАТУС: {'✅ ВОШЕЛ' if is_logged else '❌ НЕ ВОШЕЛ'}\n"
-                f"📱 НОМЕР: {user.get('phone', 'НЕТ')}",
-                reply_markup=get_account_keyboard(is_logged),
-                parse_mode="Markdown"
-            )
-        except:
-            await callback.message.answer(
-                f"🔐 **АККАУНТ**\n\nСТАТУС: {'✅ ВОШЕЛ' if is_logged else '❌ НЕ ВОШЕЛ'}",
-                reply_markup=get_account_keyboard(is_logged),
-                parse_mode="Markdown"
-            )
+    # АККАУНТ
+    elif data == "account":
+        await call.message.edit_text(
+            f"🔐 **АККАУНТ**\n\n"
+            f"СТАТУС: {'✅ ВОШЕЛ' if is_logged else '❌ НЕ ВОШЕЛ'}\n"
+            f"НОМЕР: {user.get('phone', 'НЕТ')}",
+            reply_markup=account_keyboard(is_logged), parse_mode="Markdown"
+        )
     
-    elif data == "login_start":
-        temp_data[user_id] = {"action": "login", "step": "phone"}
-        try:
-            await callback.message.edit_text(
-                "📱 **ВХОД В АККАУНТ**\n\n"
-                "📝 **ОТПРАВЬ НОМЕР ТЕЛЕФОНА:**\n\n"
-                "Формат: `+71234567890`",
-                reply_markup=get_cancel_keyboard("account_menu"),
-                parse_mode="Markdown"
-            )
-        except:
-            await callback.message.answer(
-                "📱 **ВХОД В АККАУНТ**\n\nОТПРАВЬ НОМЕР: +71234567890",
-                reply_markup=get_cancel_keyboard("account_menu"),
-                parse_mode="Markdown"
-            )
+    elif data == "login":
+        temp_data[uid] = {"action": "login", "step": "phone"}
+        await call.message.edit_text(
+            "📱 **ВХОД**\n\n"
+            "📝 **ОТПРАВЬ НОМЕР:** +71234567890",
+            reply_markup=back_keyboard("account"), parse_mode="Markdown"
+        )
     
-    elif data == "account_info":
+    elif data == "info":
         if is_logged and user.get("client"):
             try:
                 me = await user["client"].get_me()
-                await callback.answer(f"👤 {me.first_name} (@{me.username})", show_alert=True)
+                await call.answer(f"👤 {me.first_name} (@{me.username})", show_alert=True)
             except:
-                await callback.answer("❌ ОШИБКА", show_alert=True)
+                await call.answer("❌ ОШИБКА", show_alert=True)
         else:
-            await callback.answer("❌ НЕ АВТОРИЗОВАН", show_alert=True)
+            await call.answer("❌ НЕ АВТОРИЗОВАН", show_alert=True)
     
     elif data == "logout":
         if user.get("client"):
@@ -680,193 +473,193 @@ async def handle_callback(callback: CallbackQuery):
         user["running"] = False
         user["phone"] = None
         save_users()
-        await callback.answer("🚪 ВЫШЕЛ ИЗ АККАУНТА!", show_alert=True)
-        try:
-            await callback.message.edit_text(
-                "🔐 **ВЫ ВЫШЛИ ИЗ АККАУНТА**",
-                reply_markup=get_account_keyboard(False),
-                parse_mode="Markdown"
-            )
-        except:
-            await callback.message.answer(
-                "🔐 **ВЫ ВЫШЛИ ИЗ АККАУНТА**",
-                reply_markup=get_account_keyboard(False),
-                parse_mode="Markdown"
-            )
+        await call.answer("🚪 ВЫШЕЛ!", show_alert=True)
+        await call.message.edit_text("🔐 **ВЫШЕЛ ИЗ АККАУНТА**", reply_markup=account_keyboard(False), parse_mode="Markdown")
     
-    # ===== НАЗАД =====
-    elif data == "back_main":
-        try:
-            await callback.message.edit_text("🤖 **ГЛАВНОЕ МЕНЮ**", reply_markup=get_main_keyboard(), parse_mode="Markdown")
-        except:
-            await callback.message.answer("🤖 **ГЛАВНОЕ МЕНЮ**", reply_markup=get_main_keyboard(), parse_mode="Markdown")
+    # АВТО
+    elif data == "auto":
+        await call.message.edit_text(
+            "🛡️ **АВТОМАТИЧЕСКАЯ ЗАЩИТА**\n\n"
+            "🤖 АВТО-КАПЧА - решает капчи\n"
+            "📢 АВТО-ПОДПИСКА - подписывается",
+            reply_markup=auto_keyboard(uid), parse_mode="Markdown"
+        )
+    
+    elif data == "toggle_cap":
+        user["auto_captcha"] = not user.get("auto_captcha", True)
+        save_users()
+        await call.answer(f"АВТО-КАПЧА: {'ВКЛ' if user['auto_captcha'] else 'ВЫКЛ'}", show_alert=True)
+        await call.message.edit_text("🛡️ **АВТО-ЗАЩИТА**", reply_markup=auto_keyboard(uid), parse_mode="Markdown")
+    
+    elif data == "toggle_sub":
+        user["auto_subscribe"] = not user.get("auto_subscribe", True)
+        save_users()
+        await call.answer(f"АВТО-ПОДПИСКА: {'ВКЛ' if user['auto_subscribe'] else 'ВЫКЛ'}", show_alert=True)
+        await call.message.edit_text("🛡️ **АВТО-ЗАЩИТА**", reply_markup=auto_keyboard(uid), parse_mode="Markdown")
+    
+    # НАЗАД
+    elif data == "back":
+        await call.message.edit_text("🤖 **ГЛАВНОЕ МЕНЮ**", reply_markup=main_keyboard(), parse_mode="Markdown")
     
     elif data == "noop":
-        await callback.answer()
+        await call.answer()
     
-    await callback.answer()
+    await call.answer()
 
-# ===== ОБРАБОТКА ТЕКСТОВЫХ СООБЩЕНИЙ =====
-@dp.message_handler()
+# ========== ОБРАБОТКА ТЕКСТА И ФОТО ==========
+@dp.message_handler(content_types=['text'])
 async def handle_text(message: Message):
-    user_id = message.from_user.id
+    uid = message.from_user.id
     text = message.text.strip()
     
-    # Добавление цели
-    if user_id in temp_data and temp_data[user_id].get("action") == "add_target":
-        target = text.replace("https://t.me/", "").replace("@", "").strip()
-        if target:
-            target = f"@{target}"
-            
-            if user_id not in users_data:
-                create_new_user(user_id)
-            
-            if target not in users_data[user_id]["targets"]:
-                users_data[user_id]["targets"].append(target)
-                save_users()
-                await message.answer(f"✅ **ЦЕЛЬ ДОБАВЛЕНА:** {target}\n\n📊 ВСЕГО ЦЕЛЕЙ: {len(users_data[user_id]['targets'])}", parse_mode="Markdown")
-            else:
-                await message.answer(f"⚠️ ЦЕЛЬ {target} УЖЕ СУЩЕСТВУЕТ", parse_mode="Markdown")
-        else:
-            await message.answer("❌ НЕВЕРНЫЙ ФОРМАТ", parse_mode="Markdown")
-        
-        del temp_data[user_id]
-        return
+    if uid not in users_data:
+        create_new_user(uid)
     
-    # Добавление сообщения
-    if user_id in temp_data and temp_data[user_id].get("action") == "add_message":
-        if text:
-            if user_id not in users_data:
-                create_new_user(user_id)
-            
-            users_data[user_id]["message_groups"].append(text)
-            save_users()
-            await message.answer(
-                f"✅ **СООБЩЕНИЕ ДОБАВЛЕНО!**\n\n"
-                f"📝 ТЕКСТ: {text[:100]}\n"
-                f"📊 ВСЕГО СООБЩЕНИЙ: {len(users_data[user_id]['message_groups'])}",
-                parse_mode="Markdown"
-            )
-        else:
-            await message.answer("❌ ТЕКСТ НЕ МОЖЕТ БЫТЬ ПУСТЫМ", parse_mode="Markdown")
+    if uid in temp_data:
+        action = temp_data[uid].get("action")
         
-        del temp_data[user_id]
-        return
-    
-    # Логин
-    if user_id in temp_data and temp_data[user_id].get("action") == "login":
-        step = temp_data[user_id].get("step")
-        
-        if step == "phone":
-            phone = text if text.startswith("+") else "+" + text
-            
-            try:
-                session_name = f"user_{user_id}"
-                client = TelegramClient(session_name, API_ID, API_HASH)
-                await client.connect()
-                await client.send_code_request(phone)
-                
-                temp_data[user_id] = {"action": "login", "step": "code", "client": client, "phone": phone, "session_name": session_name}
-                
-                await message.answer(
-                    f"📱 **КОД ОТПРАВЛЕН НА {phone}**\n\n"
-                    f"📝 **ОТПРАВЬ КОД:** (можно с разделителями 1#2#3#4#5)",
-                    parse_mode="Markdown"
-                )
-            except Exception as e:
-                await message.answer(f"❌ ОШИБКА: {str(e)}", parse_mode="Markdown")
-                del temp_data[user_id]
-        
-        elif step == "code":
-            code = decode_code(text)
-            if code and len(code) >= 4:
-                client = temp_data[user_id].get("client")
-                phone = temp_data[user_id].get("phone")
-                
-                try:
-                    await client.sign_in(phone, code=code)
-                    
-                    if user_id not in users_data:
-                        create_new_user(user_id)
-                    
-                    users_data[user_id]["client"] = client
-                    users_data[user_id]["phone"] = phone
+        if action == "add_target":
+            target = text.replace("https://t.me/", "").replace("@", "").strip()
+            if target:
+                target = f"@{target}"
+                if target not in users_data[uid]["targets"]:
+                    users_data[uid]["targets"].append(target)
                     save_users()
-                    
-                    # ЗАПУСКАЕМ МОНИТОРИНГ
-                    await start_monitoring(user_id, client)
-                    
-                    del temp_data[user_id]
-                    
+                    await message.answer(f"✅ **ЦЕЛЬ ДОБАВЛЕНА:** {target}")
+                else:
+                    await message.answer(f"⚠️ УЖЕ ЕСТЬ")
+            del temp_data[uid]
+            return
+        
+        elif action == "add_text":
+            if text:
+                users_data[uid]["messages"].append(text)
+                save_users()
+                await message.answer(f"✅ **ТЕКСТ ДОБАВЛЕН!**\n📊 ВСЕГО: {len(users_data[uid]['messages'])}")
+            del temp_data[uid]
+            return
+        
+        elif action == "login":
+            step = temp_data[uid].get("step")
+            
+            if step == "phone":
+                phone = text if text.startswith("+") else "+" + text
+                try:
+                    client = TelegramClient(f"user_{uid}", API_ID, API_HASH)
+                    await client.connect()
+                    await client.send_code_request(phone)
+                    temp_data[uid] = {"action": "login", "step": "code", "client": client, "phone": phone}
+                    await message.answer(f"📱 **КОД ОТПРАВЛЕН**\n\n📝 ОТПРАВЬ КОД:")
+                except Exception as e:
+                    await message.answer(f"❌ {str(e)}")
+                    del temp_data[uid]
+            
+            elif step == "code":
+                code = decode_code(text)
+                if code:
+                    client = temp_data[uid].get("client")
+                    phone = temp_data[uid].get("phone")
+                    try:
+                        await client.sign_in(phone, code=code)
+                        users_data[uid]["client"] = client
+                        users_data[uid]["phone"] = phone
+                        save_users()
+                        await start_monitoring(uid, client)
+                        del temp_data[uid]
+                        await message.answer(
+                            f"✅ **УСПЕШНЫЙ ВХОД!**\n\n"
+                            f"🛡️ АВТО-ЗАЩИТА АКТИВНА\n"
+                            f"🎉 ТЕПЕРЬ МОЖНО НАСТРОИТЬ РАССЫЛКУ",
+                            reply_markup=main_keyboard()
+                        )
+                    except errors.SessionPasswordNeededError:
+                        temp_data[uid]["step"] = "2fa"
+                        await message.answer("🔐 **НУЖЕН 2FA ПАРОЛЬ!**\n📝 ОТПРАВЬ ПАРОЛЬ:")
+                    except Exception as e:
+                        await message.answer(f"❌ {str(e)}")
+                        del temp_data[uid]
+                else:
+                    await message.answer("❌ НЕ РАСПОЗНАЛ КОД")
+            
+            elif step == "2fa":
+                password = text
+                client = temp_data[uid].get("client")
+                phone = temp_data[uid].get("phone")
+                try:
+                    await client.sign_in(password=password)
+                    users_data[uid]["client"] = client
+                    users_data[uid]["phone"] = phone
+                    save_users()
+                    await start_monitoring(uid, client)
+                    del temp_data[uid]
                     await message.answer(
-                        f"✅ **УСПЕШНЫЙ ВХОД!**\n\n"
-                        f"📱 АККАУНТ: {phone}\n"
-                        f"🛡️ АВТО-ЗАЩИТА АКТИВНА!\n\n"
-                        f"🤖 Бот будет автоматически:\n"
-                        f"• Решать капчи\n"
-                        f"• Подписываться на каналы\n\n"
-                        f"🎉 ТЕПЕРЬ МОЖНО НАСТРОИТЬ РАССЫЛКУ",
-                        reply_markup=get_main_keyboard(),
-                        parse_mode="Markdown"
-                    )
-                except errors.SessionPasswordNeededError:
-                    temp_data[user_id]["step"] = "2fa"
-                    await message.answer(
-                        "🔐 **ТРЕБУЕТСЯ 2FA ПАРОЛЬ!**\n\n📝 ОТПРАВЬ ПАРОЛЬ:",
-                        parse_mode="Markdown"
+                        f"✅ **УСПЕШНЫЙ ВХОД С 2FA!**\n\n🛡️ АВТО-ЗАЩИТА АКТИВНА",
+                        reply_markup=main_keyboard()
                     )
                 except Exception as e:
-                    await message.answer(f"❌ ОШИБКА: {str(e)}", parse_mode="Markdown")
-                    del temp_data[user_id]
-            else:
-                await message.answer("❌ НЕ МОГУ РАСПОЗНАТЬ КОД. ПОПРОБУЙ СНОВА", parse_mode="Markdown")
+                    await message.answer(f"❌ {str(e)}")
+                    del temp_data[uid]
+
+@dp.message_handler(content_types=['photo'])
+async def handle_photo(message: Message):
+    uid = message.from_user.id
+    
+    if uid not in users_data:
+        create_new_user(uid)
+    
+    if uid in temp_data and temp_data[uid].get("action") == "add_photo":
+        photo = message.photo[-1]
+        file_id = photo.file_id
+        caption = message.caption or ""
         
-        elif step == "2fa":
-            password = text
-            client = temp_data[user_id].get("client")
-            phone = temp_data[user_id].get("phone")
-            
-            try:
-                await client.sign_in(password=password)
-                
-                if user_id not in users_data:
-                    create_new_user(user_id)
-                
-                users_data[user_id]["client"] = client
-                users_data[user_id]["phone"] = phone
-                save_users()
-                
-                # ЗАПУСКАЕМ МОНИТОРИНГ
-                await start_monitoring(user_id, client)
-                
-                del temp_data[user_id]
-                
-                await message.answer(
-                    f"✅ **УСПЕШНЫЙ ВХОД С 2FA!**\n\n"
-                    f"📱 АККАУНТ: {phone}\n"
-                    f"🛡️ АВТО-ЗАЩИТА АКТИВНА!",
-                    reply_markup=get_main_keyboard(),
-                    parse_mode="Markdown"
-                )
-            except Exception as e:
-                await message.answer(f"❌ ОШИБКА: {str(e)}", parse_mode="Markdown")
-                del temp_data[user_id]
+        if not os.path.exists("photos"):
+            os.makedirs("photos")
+        
+        photo_info = {
+            "type": "photo",
+            "file_id": file_id,
+            "caption": caption,
+            "file_path": None
+        }
+        
+        try:
+            file = await bot.get_file(file_id)
+            path = f"photos/{uid}_{int(asyncio.get_event_loop().time())}.jpg"
+            await bot.download_file(file.file_path, path)
+            photo_info["file_path"] = path
+        except:
+            pass
+        
+        users_data[uid]["messages"].append(photo_info)
+        save_users()
+        
+        await message.answer(
+            f"✅ **ФОТО ДОБАВЛЕНО!**\n"
+            f"📸 ПОДПИСЬ: {caption[:50] if caption else 'НЕТ'}\n"
+            f"📊 ВСЕГО: {len(users_data[uid]['messages'])}"
+        )
+        del temp_data[uid]
+    else:
+        await message.answer(
+            "📸 **ФОТО НЕ ДОБАВЛЕНО**\n\n"
+            "СНАЧАЛА НАЖМИ 'ДОБАВИТЬ ФОТО' В МЕНЮ",
+            reply_markup=main_keyboard()
+        )
 
 # ========== ЗАПУСК ==========
 async def main():
     load_users()
-    print("=" * 60)
+    print("=" * 50)
     print("🤖 БОТ ЗАПУЩЕН")
-    print("🛡️ АВТО-ПРОХОЖДЕНИЕ КАПЧ АКТИВНО")
-    print("📢 АВТО-ПОДПИСКА НА КАНАЛЫ АКТИВНА")
-    print("=" * 60)
+    print("📸 ПОДДЕРЖКА ФОТО")
+    print("🛡️ АВТО-ЗАЩИТА")
+    print("=" * 50)
     
-    # Восстанавливаем мониторинг для уже авторизованных
-    for user_id, user in users_data.items():
+    for uid, user in users_data.items():
         if user.get("client"):
-            await start_monitoring(user_id, user["client"])
+            await start_monitoring(uid, user["client"])
             if user.get("running"):
-                user["task"] = asyncio.create_task(send_loop_for_user(user_id))
+                user["task"] = asyncio.create_task(send_loop(uid))
     
     await dp.start_polling()
 
