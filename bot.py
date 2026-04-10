@@ -299,7 +299,7 @@ async def handle_callback(callback: CallbackQuery):
         targets = user.get("targets", [])
         if not targets:
             await callback.message.edit_text(
-                "🎯 **Управление целями**\n\nСписок целей пуст.\n\n➕ Добавь цель: `/addtarget @username`",
+                "🎯 **Управление целями**\n\nСписок целей пуст.\n\n➕ Добавь цель: ` /addtarget @username `",
                 reply_markup=get_targets_keyboard(user_id),
                 parse_mode="Markdown"
             )
@@ -315,8 +315,8 @@ async def handle_callback(callback: CallbackQuery):
     elif data == "add_target":
         await callback.message.edit_text(
             "➕ **Добавление цели**\n\n"
-            "Отправь команду:\n`/addtarget @username`\n\n"
-            "Пример: `/addtarget @durov`",
+            "Отправь команду:\n` /addtarget @username `\n\n"
+            "Пример: ` /addtarget @durov `",
             reply_markup=get_targets_keyboard(user_id),
             parse_mode="Markdown"
         )
