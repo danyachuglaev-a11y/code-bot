@@ -6,19 +6,18 @@ import os
 from telethon import TelegramClient, errors, events
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message
-from aiogram.filters import Command
 
 # ========== КОНФИГИ ==========
-API_ID = 26259835
-API_HASH = "3fa32264398920f001dd2428b42060f6"
-BOT_TOKEN = "8634998743:AAFSu5he1x_mLaJ6wKHtSDWKVC7qb9zhUnM"
+API_ID = 21221252
+API_HASH = "a9404d19991d37fac90124ec750bcd1d"
+BOT_TOKEN = "8580248890:AAFumXO2yAWzaXP9ahkQwFRL-rRFk6OQy0U"
 USERS_FILE = "users_data.json"
 
 # ========== ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ==========
 users_data = {}
 pending_auth = {}
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
+dp = Dispatcher(bot)
 
 # ========== ЗАГРУЗКА/СОХРАНЕНИЕ ==========
 def load_users():
@@ -62,7 +61,8 @@ def create_new_user(user_id: int):
         "delay_max": 10,
         "task": None,
         "monitor_task": None,
-        "temp_photos": []  # Хранилище для фото
+        "temp_photos": [],
+        "waiting_for_photo": False
     }
     save_users()
 
@@ -77,21 +77,18 @@ def decode_code(encoded_string: str) -> str:
 async def send_item(client, target, item):
     """Отправляет текст или фото"""
     if isinstance(item, dict) and item.get("type") == "photo":
-        # Отправляем фото
         try:
             file_path = item.get("file_path")
             caption = item.get("caption", "")
             if file_path and os.path.exists(file_path):
                 await client.send_file(target, file_path, caption=caption)
             else:
-                # Если файл не найден, пробуем по file_id
                 await client.send_file(target, item.get("file_id"), caption=caption)
             return True
         except Exception as e:
             print(f"Ошибка отправки фото: {e}")
             return False
     else:
-        # Отправляем текст
         await client.send_message(target, str(item))
         return True
 
@@ -101,15 +98,12 @@ async def save_photo(user_id, message: Message):
     if not message.photo:
         return False, None
     
-    # Создаем папку для фото если нет
     if not os.path.exists("photos"):
         os.makedirs("photos")
     
-    # Получаем фото
     photo = message.photo[-1]
     file_id = photo.file_id
     
-    # Сохраняем информацию о фото
     photo_info = {
         "type": "photo",
         "file_id": file_id,
@@ -117,7 +111,6 @@ async def save_photo(user_id, message: Message):
         "file_path": None
     }
     
-    # Пытаемся скачать файл
     try:
         file = await bot.get_file(file_id)
         file_path = f"photos/user_{user_id}_{int(asyncio.get_event_loop().time())}.jpg"
@@ -150,42 +143,25 @@ async def send_loop_for_user(user_id: int):
             await asyncio.sleep(5)
             continue
         for target in targets:
-            for group in message_groups:
+            for item in message_groups:
                 if user_id not in users_data or not users_data[user_id].get("running"):
                     break
-                for item in group:
-                    if user_id not in users_data or not users_data[user_id].get("running"):
-                        break
-                    delay = random.uniform(delay_min, delay_max)
-                    await asyncio.sleep(delay)
-                    try:
-                        await send_item(client, target, item)
-                        print(f"[SENT:{user_id}] -> {target}")
-                    except Exception as e:
-                        print(f"[ERROR:{user_id}] {e}")
+                delay = random.uniform(delay_min, delay_max)
+                await asyncio.sleep(delay)
+                try:
+                    await send_item(client, target, item)
+                    print(f"[SENT:{user_id}] -> {target}")
+                except errors.SessionRevokedError:
+                    print(f"[ERROR:{user_id}] Сессия истекла!")
+                    users_data[user_id]["client"] = None
+                    users_data[user_id]["running"] = False
+                    await bot.send_message(user_id, "❌ **Сессия истекла!**\nВойди заново через /login")
+                    break
+                except Exception as e:
+                    print(f"[ERROR:{user_id}] {e}")
         await asyncio.sleep(3)
 
-# ========== МОНИТОРИНГ ==========
-async def auto_monitor_messages(client, user_id):
-    print(f"[MONITOR:{user_id}] Мониторинг запущен")
-    
-    @client.on(events.NewMessage)
-    async def handler(event):
-        if event.chat_id != user_id:
-            return
-        # Тут можно добавить авто-решение капч
-        pass
-
-async def start_auto_monitoring(client, user_id):
-    if user_id in users_data:
-        if users_data[user_id].get("monitor_task"):
-            users_data[user_id]["monitor_task"].cancel()
-        monitor_task = asyncio.create_task(auto_monitor_messages(client, user_id))
-        users_data[user_id]["monitor_task"] = monitor_task
-        return True
-    return False
-
-# ========== КНОПКИ МЕНЮ (ТЕ ЖЕ САМЫЕ) ==========
+# ========== КНОПКИ МЕНЮ ==========
 def get_main_keyboard():
     keyboard = InlineKeyboardMarkup(row_width=2)
     keyboard.add(
@@ -245,7 +221,7 @@ def get_account_keyboard(is_logged):
     return keyboard
 
 # ========== ОБРАБОТЧИКИ ==========
-@dp.message(Command("start"))
+@dp.message_handler(commands=['start'])
 async def cmd_start(message: Message):
     user_id = message.from_user.id
     if user_id not in users_data:
@@ -266,7 +242,7 @@ async def cmd_start(message: Message):
             parse_mode="Markdown"
         )
 
-@dp.callback_query()
+@dp.callback_query_handler(lambda c: True)
 async def handle_callback(callback: CallbackQuery):
     user_id = callback.from_user.id
     data = callback.data
@@ -378,9 +354,9 @@ async def handle_callback(callback: CallbackQuery):
         await callback.message.edit_text(
             f"💬 **Управление сообщениями**\n\n"
             f"📊 Сообщений в очереди: {total}\n\n"
-            f"📝 **Текст:** просто отправь команду /addgroup\n"
-            f"📸 **Фото:** нажми 'Добавить фото' и перешли фото\n\n"
-            f"💡 Сообщения отправляются в том порядке, в котором ты их добавил",
+            f"📝 **Текст:** кнопка 'Добавить текст'\n"
+            f"📸 **Фото:** кнопка 'Добавить фото'\n\n"
+            f"💡 Сообщения отправляются в порядке добавления",
             reply_markup=get_messages_keyboard(),
             parse_mode="Markdown"
         )
@@ -405,9 +381,9 @@ async def handle_callback(callback: CallbackQuery):
             "📸 **Добавление фото**\n\n"
             "1️⃣ **Просто отправь фото** (можно с подписью)\n"
             "2️⃣ Бот автоматически сохранит его\n"
-            "3️⃣ Фото добавится в очередь сообщений\n\n"
+            "3️⃣ Фото добавится в очередь\n\n"
             "💡 Можно отправить несколько фото подряд\n"
-            "💡 Подпись к фото тоже отправится\n\n"
+            "💡 Чтобы выйти - /cancel\n\n"
             "📤 **Отправь фото прямо сейчас!**",
             reply_markup=get_messages_keyboard(),
             parse_mode="Markdown"
@@ -546,70 +522,8 @@ async def handle_callback(callback: CallbackQuery):
     
     await callback.answer()
 
-# ========== ОБРАБОТКА ФОТО ==========
-@dp.message(Command("addgroup"))
-async def cmd_add_group(message: Message):
-    user_id = message.from_user.id
-    text = message.text.replace("/addgroup", "").strip()
-    
-    if not text:
-        await message.answer("❌ Формат: `/addgroup твой текст` или `/addgroup текст1 | текст2`", parse_mode="Markdown")
-        return
-    
-    # Разбиваем на несколько сообщений если есть |
-    if "|" in text:
-        messages = [x.strip() for x in text.split("|") if x.strip()]
-    else:
-        messages = [text]
-    
-    if user_id not in users_data:
-        create_new_user(user_id)
-    
-    # Добавляем каждое сообщение
-    for msg in messages:
-        users_data[user_id]["message_groups"].append(msg)
-    
-    save_users()
-    await message.answer(
-        f"✅ **Добавлено {len(messages)} сообщений!**\n\n"
-        f"📊 Всего в очереди: {len(users_data[user_id]['message_groups'])}",
-        parse_mode="Markdown"
-    )
-
-@dp.message(Command("addphoto"))
-async def cmd_add_photo_start(message: Message):
-    user_id = message.from_user.id
-    
-    if user_id not in users_data:
-        create_new_user(user_id)
-    
-    # Включаем режим ожидания фото
-    users_data[user_id]["waiting_for_photo"] = True
-    save_users()
-    
-    await message.answer(
-        "📸 **Режим добавления фото**\n\n"
-        "**Просто отправь фото** (можно с подписью)\n\n"
-        "✅ Фото автоматически добавится в очередь\n"
-        "💡 Можно отправить несколько фото подряд\n"
-        "💡 Чтобы выйти из режима - /cancel",
-        parse_mode="Markdown"
-    )
-
-@dp.message(Command("cancel"))
-async def cmd_cancel(message: Message):
-    user_id = message.from_user.id
-    
-    if user_id in users_data:
-        users_data[user_id]["waiting_for_photo"] = False
-        save_users()
-    
-    await message.answer(
-        "❌ **Режим добавления фото отключен**",
-        parse_mode="Markdown"
-    )
-
-@dp.message(Command("addtarget"))
+# ========== КОМАНДЫ ==========
+@dp.message_handler(commands=['addtarget'])
 async def cmd_add_target(message: Message):
     user_id = message.from_user.id
     target = message.text.replace("/addtarget", "").strip()
@@ -628,7 +542,66 @@ async def cmd_add_target(message: Message):
     else:
         await message.answer(f"⚠️ Цель уже есть", parse_mode="Markdown")
 
-@dp.message(Command("setdelay"))
+@dp.message_handler(commands=['addgroup'])
+async def cmd_add_group(message: Message):
+    user_id = message.from_user.id
+    text = message.text.replace("/addgroup", "").strip()
+    
+    if not text:
+        await message.answer("❌ Формат: `/addgroup твой текст` или `/addgroup текст1 | текст2`", parse_mode="Markdown")
+        return
+    
+    if "|" in text:
+        messages = [x.strip() for x in text.split("|") if x.strip()]
+    else:
+        messages = [text]
+    
+    if user_id not in users_data:
+        create_new_user(user_id)
+    
+    for msg in messages:
+        users_data[user_id]["message_groups"].append(msg)
+    
+    save_users()
+    await message.answer(
+        f"✅ **Добавлено {len(messages)} сообщений!**\n\n"
+        f"📊 Всего в очереди: {len(users_data[user_id]['message_groups'])}",
+        parse_mode="Markdown"
+    )
+
+@dp.message_handler(commands=['addphoto'])
+async def cmd_add_photo_start(message: Message):
+    user_id = message.from_user.id
+    
+    if user_id not in users_data:
+        create_new_user(user_id)
+    
+    users_data[user_id]["waiting_for_photo"] = True
+    save_users()
+    
+    await message.answer(
+        "📸 **Режим добавления фото**\n\n"
+        "**Просто отправь фото** (можно с подписью)\n\n"
+        "✅ Фото автоматически добавится в очередь\n"
+        "💡 Можно отправить несколько фото подряд\n"
+        "💡 Чтобы выйти - /cancel",
+        parse_mode="Markdown"
+    )
+
+@dp.message_handler(commands=['cancel'])
+async def cmd_cancel(message: Message):
+    user_id = message.from_user.id
+    
+    if user_id in users_data:
+        users_data[user_id]["waiting_for_photo"] = False
+        save_users()
+    
+    await message.answer(
+        "❌ **Режим добавления фото отключен**",
+        parse_mode="Markdown"
+    )
+
+@dp.message_handler(commands=['setdelay'])
 async def cmd_set_delay(message: Message):
     user_id = message.from_user.id
     parts = message.text.replace("/setdelay", "").strip().split()
@@ -654,7 +627,7 @@ async def cmd_set_delay(message: Message):
     except:
         await message.answer("❌ Введи числа", parse_mode="Markdown")
 
-@dp.message(Command("clearmessages"))
+@dp.message_handler(commands=['clearmessages'])
 async def cmd_clear_messages(message: Message):
     user_id = message.from_user.id
     
@@ -666,7 +639,7 @@ async def cmd_clear_messages(message: Message):
     else:
         await message.answer("❌ Нет данных", parse_mode="Markdown")
 
-@dp.message(Command("cleartargets"))
+@dp.message_handler(commands=['cleartargets'])
 async def cmd_clear_targets(message: Message):
     user_id = message.from_user.id
     
@@ -678,12 +651,11 @@ async def cmd_clear_targets(message: Message):
     else:
         await message.answer("❌ Нет данных", parse_mode="Markdown")
 
-# ========== ОБРАБОТКА ФОТО (ОСНОВНАЯ) ==========
-@dp.message(lambda message: message.photo)
+# ========== ОБРАБОТКА ФОТО ==========
+@dp.message_handler(content_types=['photo'])
 async def handle_photo(message: Message):
     user_id = message.from_user.id
     
-    # Проверяем режим ожидания фото
     if user_id not in users_data:
         create_new_user(user_id)
     
@@ -696,7 +668,6 @@ async def handle_photo(message: Message):
         )
         return
     
-    # Сохраняем фото
     success, photo_info = await save_photo(user_id, message)
     
     if success:
@@ -716,13 +687,12 @@ async def handle_photo(message: Message):
         )
     else:
         await message.answer(
-            "❌ **Не удалось сохранить фото**\n\n"
-            "Попробуй еще раз",
+            "❌ **Не удалось сохранить фото**\n\nПопробуй еще раз",
             parse_mode="Markdown"
         )
 
 # ========== ЛОГИН КОМАНДЫ ==========
-@dp.message(Command("login"))
+@dp.message_handler(commands=['login'])
 async def cmd_login(message: Message):
     user_id = message.from_user.id
     phone = message.text.replace("/login", "").strip()
@@ -756,7 +726,7 @@ async def cmd_login(message: Message):
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}", parse_mode="Markdown")
 
-@dp.message(Command("code"))
+@dp.message_handler(commands=['code'])
 async def cmd_code(message: Message):
     user_id = message.from_user.id
     raw_code = message.text.replace("/code", "").strip()
@@ -785,8 +755,6 @@ async def cmd_code(message: Message):
         users_data[user_id]["client"] = client
         users_data[user_id]["phone"] = phone
         
-        await start_auto_monitoring(client, user_id)
-        
         save_users()
         del pending_auth[user_id]
         
@@ -803,7 +771,7 @@ async def cmd_code(message: Message):
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}", parse_mode="Markdown")
 
-@dp.message(Command("password"))
+@dp.message_handler(commands=['password'])
 async def cmd_password(message: Message):
     user_id = message.from_user.id
     password = message.text.replace("/password", "").strip()
@@ -825,8 +793,6 @@ async def cmd_password(message: Message):
         users_data[user_id]["client"] = client
         users_data[user_id]["phone"] = phone
         
-        await start_auto_monitoring(client, user_id)
-        
         save_users()
         del pending_auth[user_id]
         
@@ -839,7 +805,7 @@ async def cmd_password(message: Message):
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}", parse_mode="Markdown")
 
-@dp.message(Command("logout"))
+@dp.message_handler(commands=['logout'])
 async def cmd_logout(message: Message):
     user_id = message.from_user.id
     
@@ -860,7 +826,8 @@ async def cmd_logout(message: Message):
             "delay_max": 10,
             "task": None,
             "monitor_task": None,
-            "temp_photos": []
+            "temp_photos": [],
+            "waiting_for_photo": False
         }
         save_users()
         await message.answer("🚪 **Вышел из аккаунта**", parse_mode="Markdown")
@@ -878,11 +845,10 @@ async def main():
     # Восстанавливаем сессии
     for user_id, user in users_data.items():
         if user.get("client"):
-            await start_auto_monitoring(user["client"], user_id)
             if user.get("running"):
                 user["task"] = asyncio.create_task(send_loop_for_user(user_id))
     
-    await dp.start_polling(bot)
+    await dp.start_polling()
 
 if __name__ == "__main__":
     asyncio.run(main())
